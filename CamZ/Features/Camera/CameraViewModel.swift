@@ -19,9 +19,6 @@ final class CameraViewModel {
         case pro
     }
 
-    /// Longest a shot waits for the preview to settle before it is taken anyway.
-    static let maxSteadyWait: TimeInterval = 1.5
-
     // MARK: State
 
     var mode: Mode = .auto
@@ -73,6 +70,8 @@ final class CameraViewModel {
     /// Decides when autofocus follows the subject. Pauses for a few seconds after a user tap.
     private var focusPlanner = FocusPlanner()
     private var lastAutoZoomChange = Date.distantPast
+    /// When the director last reported. Old or missing decisions mean the AI has stalled.
+    private var lastDecisionAt: Date?
     /// Auto leaves zoom alone for a while after the user pinches or picks a lens.
     private var userZoomedAt = Date.distantPast
 
@@ -114,6 +113,7 @@ final class CameraViewModel {
             if !wasRunning { setZoom(capabilities.baseZoom) }
             interruption = nil
             status = .running
+            director.setActive(mode == .auto)
         } catch {
             status = .failed(error.localizedDescription)
         }
@@ -121,6 +121,7 @@ final class CameraViewModel {
 
     func stop() {
         camera.stop()
+        director.setActive(false)
         if status == .running { status = .idle }
     }
 
@@ -193,6 +194,7 @@ final class CameraViewModel {
     func toggleMode() {
         mode = mode == .auto ? .pro : .auto
         if mode == .auto { isExposureLocked = false }
+        director.setActive(mode == .auto && status == .running)
     }
 
     func focus(atTap tap: CGPoint, in size: CGSize) {
@@ -242,6 +244,7 @@ final class CameraViewModel {
     /// and the user's manual settings always win.
     func apply(_ decision: PhotoDecision) {
         self.decision = decision
+        lastDecisionAt = Date.now
         guard mode == .auto, status == .running, interruption == nil else { return }
         let now = Date.now
         let clock = uptime
@@ -282,10 +285,16 @@ final class CameraViewModel {
         }
     }
 
-    /// In Auto, gives the preview a short, bounded time to settle so the shot is sharp and correctly exposed.
+    /// In Auto, waits briefly for a steady preview so the shot is sharp. The wait is bounded, and it never holds
+    /// the shutter for a stalled AI.
     private func waitForSteadyFrame() async {
-        let deadline = Date.now.addingTimeInterval(Self.maxSteadyWait)
-        while !decision.readiness.isSteady, Date.now < deadline {
+        let started = Date.now
+        while true {
+            let elapsed = Date.now.timeIntervalSince(started)
+            let age = lastDecisionAt.map { Date.now.timeIntervalSince($0) }
+            guard CaptureWaitPolicy.shouldKeepWaiting(readiness: decision.readiness, decisionAge: age, elapsed: elapsed) else {
+                return
+            }
             try? await Task.sleep(for: .milliseconds(100))
         }
     }

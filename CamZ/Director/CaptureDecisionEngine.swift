@@ -81,3 +81,23 @@ struct CaptureDecisionEngine: Sendable {
         return calmFrames >= required ? .steady : .moving
     }
 }
+
+/// Decides whether a shot should still wait for a steady frame. Waiting is always bounded: capture never waits on a
+/// stalled AI, and it never waits longer than `maxWait`.
+enum CaptureWaitPolicy {
+    /// Longest a shot waits for a steady frame.
+    static let maxWait: TimeInterval = 1.5
+    /// A decision older than this means the AI has stalled, so the shot is not held for it.
+    static let maxDecisionAge: TimeInterval = 1.0
+
+    /// True while the shot should keep waiting.
+    /// - Parameters:
+    ///   - readiness: The latest readiness from the director.
+    ///   - decisionAge: Seconds since the latest decision, or nil when no decision has arrived.
+    ///   - elapsed: Seconds this shot has already waited.
+    static func shouldKeepWaiting(readiness: CaptureReadiness, decisionAge: TimeInterval?, elapsed: TimeInterval) -> Bool {
+        guard elapsed < maxWait else { return false }
+        guard let decisionAge, decisionAge <= maxDecisionAge else { return false }
+        return !readiness.isSteady
+    }
+}

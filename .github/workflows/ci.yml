@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,3 +40,54 @@ jobs:
             -destination "id=${{ steps.sim.outputs.udid }}" \
             CODE_SIGNING_ALLOWED=NO \
             -quiet
+
+  artifacts:
+    name: Unsigned build artifacts
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build simulator app (unsigned)
+        run: |
+          xcodebuild build \
+            -project CamZ.xcodeproj \
+            -scheme CamZ \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet
+
+      - name: Build unsigned archive
+        run: |
+          xcodebuild archive \
+            -project CamZ.xcodeproj \
+            -scheme CamZ \
+            -destination "generic/platform=iOS" \
+            -archivePath build/CamZ.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet
+
+      - name: Package unsigned artifacts
+        run: |
+          mkdir -p artifacts
+          ditto -c -k --keepParent build/Build/Products/Debug-iphonesimulator/CamZ.app artifacts/CamZ-simulator-UNSIGNED.app.zip
+          ditto -c -k --keepParent build/CamZ.xcarchive artifacts/CamZ-device-UNSIGNED.xcarchive.zip
+          echo "Cam Z build artifacts. Neither file is a signed iPhone build." > artifacts/README.txt
+          echo "CamZ-simulator-UNSIGNED.app.zip runs only in the iOS Simulator." >> artifacts/README.txt
+          echo "CamZ-device-UNSIGNED.xcarchive.zip is unsigned. Install it on an iPhone only through Xcode, with your own team." >> artifacts/README.txt
+
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: camz-unsigned-build-artifacts
+          path: artifacts/
+          retention-days: 7
