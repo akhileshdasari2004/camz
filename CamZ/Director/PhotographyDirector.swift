@@ -43,6 +43,8 @@ final class PhotographyDirector: @unchecked Sendable {
 
     // Shared with the camera thread (guarded by `lock`).
     private var throttle = AnalysisThrottle(interval: PhotographyDirector.analysisInterval)
+    /// False in Pro mode or while the camera is stopped: frames are then not analysed at all.
+    private var isActive = true
     private var zoom: CGFloat = 1
     private var zoomPresets: [CGFloat] = [1]
 
@@ -54,6 +56,11 @@ final class PhotographyDirector: @unchecked Sendable {
     private var sceneStable = Stabilizer<SceneKind>(required: 3)
     private var zoomStable = Stabilizer<CGFloat>(required: 3)
     private var guidanceStable = Stabilizer<Guidance>(required: 2)
+
+    /// Turns analysis on or off. Off costs nothing per frame. Safe from any thread.
+    func setActive(_ active: Bool) {
+        lock.withLock { isActive = active }
+    }
 
     /// Tells the director the zoom in use and which presets the camera offers. Safe from any thread.
     func updateZoom(_ current: CGFloat, presets: [CGFloat]) {
@@ -69,7 +76,7 @@ final class PhotographyDirector: @unchecked Sendable {
     ///   - settling: True while the camera is still adjusting focus or exposure.
     func submit(_ image: CIImage, settling: Bool) {
         let now = ProcessInfo.processInfo.systemUptime
-        let accepted = lock.withLock { throttle.tryStart(now: now) }
+        let accepted = lock.withLock { isActive && throttle.tryStart(now: now) }
         guard accepted else { return }
 
         queue.async { [self] in

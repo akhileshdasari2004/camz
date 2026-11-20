@@ -142,6 +142,16 @@ final class AIDecisionLogicTests: XCTestCase {
         XCTAssertEqual(engine.ingest(motion: 0, settling: false, lowLight: true), .steady)
     }
 
+    // MARK: Capture wait bounds
+
+    func testCaptureWaitIsBoundedAndNeverHoldsForAStalledAI() {
+        XCTAssertTrue(CaptureWaitPolicy.shouldKeepWaiting(readiness: .moving, decisionAge: 0.2, elapsed: 0.5))
+        XCTAssertFalse(CaptureWaitPolicy.shouldKeepWaiting(readiness: .steady, decisionAge: 0.2, elapsed: 0.5))
+        XCTAssertFalse(CaptureWaitPolicy.shouldKeepWaiting(readiness: .moving, decisionAge: nil, elapsed: 0))
+        XCTAssertFalse(CaptureWaitPolicy.shouldKeepWaiting(readiness: .moving, decisionAge: 2.0, elapsed: 0.1))
+        XCTAssertFalse(CaptureWaitPolicy.shouldKeepWaiting(readiness: .moving, decisionAge: 0.2, elapsed: 1.5))
+    }
+
     // MARK: Point of interest
 
     func testVisionPointsMapToFocusSpace() {
