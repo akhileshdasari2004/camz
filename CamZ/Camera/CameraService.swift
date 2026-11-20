@@ -12,6 +12,10 @@ struct CameraCapabilities: Equatable, Sendable {
     var minBias: Float = 0
     var maxBias: Float = 0
     var hasFlash = false
+    /// True when a physical ultra-wide lens is part of the active camera, so 0.5× is optical.
+    var hasUltraWide = false
+    /// True when a physical telephoto lens is part of the active camera.
+    var hasTelephoto = false
 }
 
 enum CameraError: LocalizedError {
@@ -156,6 +160,36 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
         }
     }
 
+    /// Re-aims continuous autofocus at a point of interest. Unlike `focus(at:)`, it leaves exposure alone,
+    /// so AI exposure adjustments are not reset each time focus moves.
+    func trackFocus(at point: CGPoint) {
+        sessionQueue.async { [self] in
+            guard let device = deviceInput?.device else { return }
+            try? withLockedDevice(device) { d in
+                guard d.isFocusPointOfInterestSupported else { return }
+                d.focusPointOfInterest = point
+                if d.isFocusModeSupported(.continuousAutoFocus) {
+                    d.focusMode = .continuousAutoFocus
+                } else if d.isFocusModeSupported(.autoFocus) {
+                    d.focusMode = .autoFocus
+                }
+            }
+        }
+    }
+
+    /// Moves zoom smoothly toward `factor` (about four times per second), so lens changes don't jump.
+    func rampZoom(to factor: CGFloat) {
+        sessionQueue.async { [self] in
+            guard let device = deviceInput?.device else { return }
+            let value = CameraMath.clampedZoom(
+                factor,
+                min: device.minAvailableVideoZoomFactor,
+                max: maxUsableZoom(for: device)
+            )
+            try? withLockedDevice(device) { $0.ramp(toVideoZoomFactor: value, withRate: 4) }
+        }
+    }
+
     func setExposureBias(_ bias: Float) {
         sessionQueue.async { [self] in
             guard let device = deviceInput?.device else { return }
@@ -193,7 +227,7 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
                 if photoOutput.supportedFlashModes.contains(flash) {
                     settings.flashMode = flash
                 }
-                settings.photoQualityPrioritization = .balanced
+                settings.photoQualityPrioritization = .quality
 
                 if let connection = photoOutput.connection(with: .video) {
                     // Level with the horizon however the phone is held (portrait or landscape).
@@ -253,7 +287,7 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
         if !session.outputs.contains(photoOutput) {
             guard session.canAddOutput(photoOutput) else { throw CameraError.configurationFailed }
             session.addOutput(photoOutput)
-            photoOutput.maxPhotoQualityPrioritization = .balanced
+            photoOutput.maxPhotoQualityPrioritization = .quality
         }
 
         // Deliver preview frames upright and mirrored like a selfie on the front camera.
@@ -350,7 +384,9 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
             baseZoom: Self.wideLensZoom(for: device),
             minBias: device.minExposureTargetBias,
             maxBias: device.maxExposureTargetBias,
-            hasFlash: device.hasFlash
+            hasFlash: device.hasFlash,
+            hasUltraWide: device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera },
+            hasTelephoto: device.constituentDevices.contains { $0.deviceType == .builtInTelephotoCamera }
         )
     }
 

@@ -9,12 +9,16 @@ enum LensSelector {
     static let largeFaceArea: Float = 0.35
 
     /// Returns the zoom to use: a preset from `presets`, or `current` when no change helps.
+    /// Changes happen only for confident scene decisions, so a guess never moves the lens.
     static func recommendedZoom(
         scene: SceneKind,
         faceAreaFraction: Float,
         current: CGFloat,
-        presets: [CGFloat]
+        presets: [CGFloat],
+        isConfident: Bool = true
     ) -> CGFloat {
+        guard isConfident else { return current }
+
         func offered(_ zoom: CGFloat) -> Bool {
             presets.contains { abs($0 - zoom) < 0.01 }
         }

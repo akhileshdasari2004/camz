@@ -68,10 +68,16 @@ final class CameraViewModel {
     private let library: PhotoSaving
     private var zoomAtGestureStart: CGFloat = 1
     private var focusResetTask: Task<Void, Never>?
-    private var lastAutoExposureChange = Date.distantPast
+    /// Decides when a suggested exposure change is applied: agreement first, then spacing and a deadband.
+    private var exposureGovernor = ExposureGovernor()
+    /// Decides when autofocus follows the subject. Pauses for a few seconds after a user tap.
+    private var focusPlanner = FocusPlanner()
     private var lastAutoZoomChange = Date.distantPast
     /// Auto leaves zoom alone for a while after the user pinches or picks a lens.
     private var userZoomedAt = Date.distantPast
+
+    /// Monotonic clock for the director's throttles, unaffected by changes to the system date.
+    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     init(
         camera: CameraControlling = CameraService(),
@@ -196,6 +202,7 @@ final class CameraViewModel {
             isMirrored: capabilities.position == .front
         )
         camera.focus(at: point)
+        focusPlanner.noteUserTap(now: uptime)
         exposureBias = 0
         focusPoint = tap
 
@@ -231,27 +238,46 @@ final class CameraViewModel {
 
     // MARK: AI direction
 
-    /// Applies the director's suggestions in Auto mode. Each change is throttled so the camera can settle between them.
-    private func apply(_ decision: PhotoDecision) {
+    /// Applies the director's suggestions in Auto mode. Every change is checked for stability and spacing,
+    /// and the user's manual settings always win.
+    func apply(_ decision: PhotoDecision) {
         self.decision = decision
         guard mode == .auto, status == .running, interruption == nil else { return }
         let now = Date.now
+        let clock = uptime
 
+        // Exposure: only after the same direction is suggested twice, at most once a second, and never when locked.
         if !isExposureLocked,
-           let delta = decision.exposure?.suggestedBiasDelta, delta != 0,
-           now.timeIntervalSince(lastAutoExposureChange) > 1.0 {
-            let target = CameraMath.clampedBias(exposureBias + delta, min: capabilities.minBias, max: capabilities.maxBias)
+           let delta = decision.exposure?.suggestedBiasDelta,
+           let step = exposureGovernor.propose(delta, now: clock) {
+            let target = CameraMath.clampedBias(exposureBias + step, min: capabilities.minBias, max: capabilities.maxBias)
             if target != exposureBias {
                 applyBias(target)
-                lastAutoExposureChange = now
             }
         }
 
+        // Focus: follow the subject's eyes or face, without refocusing loops or fighting a recent tap.
+        if let point = decision.focusTarget,
+           let planned = focusPlanner.target(for: point, now: clock) {
+            camera.trackFocus(at: CameraMath.pointOfInterest(
+                forNormalizedImagePoint: planned,
+                isMirrored: capabilities.position == .front
+            ))
+        }
+
+        // Lens: a smooth ramp to the recommended zoom, paused for a while after the user zooms by hand.
         if let target = decision.recommendedZoom,
            abs(target - displayZoom) > 0.05,
            now.timeIntervalSince(lastAutoZoomChange) > 2.0,
            now.timeIntervalSince(userZoomedAt) > 5.0 {
-            setZoom(target * capabilities.baseZoom)
+            let factor = CameraMath.clampedZoom(
+                target * capabilities.baseZoom,
+                min: capabilities.minZoom,
+                max: capabilities.maxZoom
+            )
+            zoom = factor
+            camera.rampZoom(to: factor)
+            director.updateZoom(displayZoom, presets: zoomPresets)
             lastAutoZoomChange = now
         }
     }
