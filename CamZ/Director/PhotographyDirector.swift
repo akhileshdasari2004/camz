@@ -75,7 +75,7 @@ final class PhotographyDirector: @unchecked Sendable {
     ///   - image: The raw, unfiltered, upright preview frame.
     ///   - settling: True while the camera is still adjusting focus or exposure.
     func submit(_ image: CIImage, settling: Bool) {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = Date.timeIntervalSinceReferenceDate
         let accepted = lock.withLock { isActive && throttle.tryStart(now: now) }
         guard accepted else { return }
 

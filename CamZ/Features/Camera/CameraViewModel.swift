@@ -75,8 +75,8 @@ final class CameraViewModel {
     /// Auto leaves zoom alone for a while after the user pinches or picks a lens.
     private var userZoomedAt = Date.distantPast
 
-    /// Monotonic clock for the director's throttles, unaffected by changes to the system date.
-    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    /// Clock for the director's throttles, in wall-clock seconds. Avoids the boot-time API, which needs a privacy declaration.
+    private var throttleClock: TimeInterval { Date.timeIntervalSinceReferenceDate }
 
     init(
         camera: CameraControlling = CameraService(),
@@ -204,7 +204,7 @@ final class CameraViewModel {
             isMirrored: capabilities.position == .front
         )
         camera.focus(at: point)
-        focusPlanner.noteUserTap(now: uptime)
+        focusPlanner.noteUserTap(now: throttleClock)
         exposureBias = 0
         focusPoint = tap
 
@@ -224,7 +224,13 @@ final class CameraViewModel {
         isCapturing = true
         defer { isCapturing = false }
 
+        #if DEBUG
+        let waitStarted = Date.now
+        #endif
         if mode == .auto { await waitForSteadyFrame() }
+        #if DEBUG
+        let waited = Date.now.timeIntervalSince(waitStarted)
+        #endif
 
         do {
             let data = try await camera.capturePhoto(flash: flashMode) { [weak self] in
@@ -233,8 +239,14 @@ final class CameraViewModel {
             captureCount += 1
             lastThumbnail = await Self.makeThumbnail(from: data)
             try await library.save(data)
+            #if DEBUG
+            DeviceLog.capture(waited: waited, outcome: "saved")
+            #endif
         } catch {
             toast = error.localizedDescription
+            #if DEBUG
+            DeviceLog.capture(waited: waited, outcome: "failed")
+            #endif
         }
     }
 
@@ -245,9 +257,12 @@ final class CameraViewModel {
     func apply(_ decision: PhotoDecision) {
         self.decision = decision
         lastDecisionAt = Date.now
+        #if DEBUG
+        DeviceLog.decision(decision, bias: exposureBias, zoom: zoom)
+        #endif
         guard mode == .auto, status == .running, interruption == nil else { return }
         let now = Date.now
-        let clock = uptime
+        let clock = throttleClock
 
         // Exposure: only after the same direction is suggested twice, at most once a second, and never when locked.
         if !isExposureLocked,
