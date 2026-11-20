@@ -59,30 +59,66 @@ struct ExposureAssessment: Equatable, Sendable {
     var suggestedBiasDelta: Float
 }
 
-/// Turns luminance histograms into an exposure judgement. Pure, so it runs and is tested without a camera.
+/// How exposure should treat the scene.
+enum ExposureIntent: Equatable, Sendable {
+    /// Subject-led exposure toward a brightness suited to the scene.
+    case standard
+    /// Night and sunset. Keep the mood: only protect highlights, never lift toward mid-grey.
+    case atmospheric
+}
+
+/// Turns luminance histograms into an exposure judgement. Pure, so it is tested without a camera.
 enum ExposureAnalyzer {
-    /// Where a well-exposed subject sits on the 0…1 brightness scale (a little below middle grey).
+    /// General target brightness on the 0…1 scale (a little below middle grey).
     static let targetMean: Float = 0.42
     /// Changes smaller than this (EV) are ignored, so exposure does not hunt back and forth.
     static let deadband: Float = 0.3
     /// Largest single correction we will ask for, in EV.
     static let maxStep: Float = 1.5
-    /// Fraction of the computed correction applied per decision. Less than 1 avoids overshoot.
+    /// Fraction of the computed correction suggested per analysis. Less than 1 avoids overshoot.
     static let damping: Float = 0.6
 
-    static func assess(frame: LuminanceHistogram, subject: LuminanceHistogram?) -> ExposureAssessment {
-        let reference = subject ?? frame
-        let subjectMean = max(reference.mean, 0.01)
+    static func intent(for scene: SceneKind, warm: Bool, frameMean: Float) -> ExposureIntent {
+        if scene == .night { return .atmospheric }
+        // Warm outdoor light that isn't blown out reads as sunset or golden hour.
+        if warm, frameMean < 0.6, scene == .landscape || scene == .outdoor { return .atmospheric }
+        return .standard
+    }
 
-        var delta = log2(targetMean / subjectMean) * damping
+    /// Brightness the subject should land at, on the 0…1 scale.
+    static func target(for scene: SceneKind, intent: ExposureIntent) -> Float {
+        switch intent {
+        case .atmospheric:
+            return scene == .night ? 0.22 : 0.34
+        case .standard:
+            switch scene {
+            case .portrait: return 0.46              // slightly brighter, so skin tones stay open
+            case .food: return 0.44
+            case .landscape, .outdoor: return 0.40  // leave room for sky and highlights
+            case .architecture, .indoor, .general, .night: return targetMean
+            }
+        }
+    }
+
+    static func assess(
+        frame: LuminanceHistogram,
+        subject: LuminanceHistogram?,
+        scene: SceneKind = .general,
+        warm: Bool = false
+    ) -> ExposureAssessment {
+        let reference = subject ?? frame
+        let mean = max(reference.mean, 0.01)
+        let intent = intent(for: scene, warm: warm, frameMean: frame.mean)
+        let goal = target(for: scene, intent: intent)
+
+        var delta = log2(goal / mean) * damping
         var status: ExposureStatus
 
-        let subjectHighlights = reference.highlightClipping
-        if subjectHighlights > 0.02 || frame.highlightClipping > 0.05 {
+        if reference.highlightClipping > 0.02 || frame.highlightClipping > 0.05 {
+            // Protect highlights first, even when the subject itself is still a little dark.
             status = .highlightsClipping
-            // Protect the highlights first, even if the subject is still a little dark.
             delta = min(delta, -deadband)
-        } else if reference.shadowClipping > 0.25, subjectMean < targetMean {
+        } else if intent == .standard, reference.shadowClipping > 0.25, mean < goal {
             status = .shadowsClipping
             delta = max(delta, deadband)
         } else if delta > 0.5 {
@@ -93,7 +129,12 @@ enum ExposureAnalyzer {
             status = .balanced
         }
 
-        if abs(delta) < deadband, status == .balanced {
+        if intent == .atmospheric, status != .highlightsClipping {
+            // Night and sunset are intentional: no correction, and no under- or overexposed label.
+            delta = 0
+            status = .balanced
+        }
+        if abs(delta) < deadband {
             delta = 0
         }
         delta = min(max(delta, -maxStep), maxStep)
@@ -108,7 +149,7 @@ enum ExposureAnalyzer {
         )
     }
 
-    /// Builds a luminance histogram of `region` (the whole image when nil) on the GPU or CPU via Core Image.
+    /// Builds a luminance histogram of `region` (the whole image when nil) with Core Image.
     /// Blocking: call off the main thread.
     static func histogram(of image: CIImage, in region: CGRect? = nil, context: CIContext) -> LuminanceHistogram? {
         let extent = region.map { image.extent.intersection($0) } ?? image.extent

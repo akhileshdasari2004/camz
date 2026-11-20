@@ -49,11 +49,22 @@ protocol CameraControlling: AnyObject, Sendable {
     func setZoom(_ factor: CGFloat)
     func focus(at point: CGPoint)
     func setExposureBias(_ bias: Float)
+    /// Re-aims continuous autofocus at a point of interest (AVFoundation space) without touching exposure.
+    func trackFocus(at point: CGPoint)
+    /// Moves zoom smoothly toward `factor` where the hardware supports it.
+    func rampZoom(to factor: CGFloat)
 
     func capturePhoto(
         flash: AVCaptureDevice.FlashMode,
         willCapture: @escaping @Sendable () -> Void
     ) async throws -> Data
+}
+
+/// Default behaviour for the new camera controls, so existing implementations and test doubles keep working.
+/// `CameraService` overrides both with the real hardware calls.
+extension CameraControlling {
+    func trackFocus(at point: CGPoint) {}
+    func rampZoom(to factor: CGFloat) { setZoom(factor) }
 }
 
 /// Where finished photos go.

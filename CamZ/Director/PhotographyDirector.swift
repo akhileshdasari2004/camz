@@ -5,17 +5,23 @@ import Vision
 /// Everything the UI and the capture logic need from one analysis pass.
 struct PhotoDecision: Equatable, Sendable {
     var scene: SceneKind = .general
+    /// False when the scene is a brightness and colour guess rather than a confident identification.
+    var sceneIsConfident = false
     var lighting: LightingCondition = .balanced
     /// `nil` until the first frame has been analysed.
     var exposure: ExposureAssessment?
     /// Stable zoom recommendation (display units, 1× = main lens).
     var recommendedZoom: CGFloat?
-    var composition: CompositionAdvice = .none
+    /// Where autofocus should aim: the eye midpoint when visible, else the face centre.
+    /// Normalised image coordinates (origin bottom-left). `nil` when no face is found.
+    var focusTarget: CGPoint?
+    /// The single most useful piece of guidance right now.
+    var guidance: Guidance = .none
     var readiness: CaptureReadiness = .moving
     var faceCount = 0
 }
 
-/// Runs scene, exposure, lens and composition analysis on live preview frames.
+/// Runs scene, exposure, lens, focus and guidance analysis on live preview frames.
 ///
 /// Frames arrive on the camera's video queue. `submit` returns immediately: it drops a frame when an analysis is
 /// already running or when the last one was too recent. Analysis runs on the director's own background queue, and
@@ -36,8 +42,7 @@ final class PhotographyDirector: @unchecked Sendable {
     private let lock = NSLock()
 
     // Shared with the camera thread (guarded by `lock`).
-    private var isBusy = false
-    private var lastSubmit: TimeInterval = -.infinity
+    private var throttle = AnalysisThrottle(interval: PhotographyDirector.analysisInterval)
     private var zoom: CGFloat = 1
     private var zoomPresets: [CGFloat] = [1]
 
@@ -48,6 +53,7 @@ final class PhotographyDirector: @unchecked Sendable {
     private var readiness = CaptureDecisionEngine()
     private var sceneStable = Stabilizer<SceneKind>(required: 3)
     private var zoomStable = Stabilizer<CGFloat>(required: 3)
+    private var guidanceStable = Stabilizer<Guidance>(required: 2)
 
     /// Tells the director the zoom in use and which presets the camera offers. Safe from any thread.
     func updateZoom(_ current: CGFloat, presets: [CGFloat]) {
@@ -63,17 +69,12 @@ final class PhotographyDirector: @unchecked Sendable {
     ///   - settling: True while the camera is still adjusting focus or exposure.
     func submit(_ image: CIImage, settling: Bool) {
         let now = ProcessInfo.processInfo.systemUptime
-        let accepted = lock.withLock { () -> Bool in
-            guard !isBusy, now - lastSubmit >= Self.analysisInterval else { return false }
-            isBusy = true
-            lastSubmit = now
-            return true
-        }
+        let accepted = lock.withLock { throttle.tryStart(now: now) }
         guard accepted else { return }
 
         queue.async { [self] in
             let decision = analyze(image, settling: settling, now: now)
-            lock.withLock { isBusy = false }
+            lock.withLock { throttle.finish() }
             onDecision?(decision)
         }
     }
@@ -87,69 +88,97 @@ final class PhotographyDirector: @unchecked Sendable {
             return PhotoDecision(readiness: readiness.ingest(motion: 1, settling: settling))
         }
 
-        // Motion from the change between this frame and the last analysed one.
+        // Motion between this frame and the last analysed one.
         let signature = Self.signature(of: image, context: context)
         let motion = previousSignature.map { FrameMotion.difference($0, signature) } ?? 1
         previousSignature = signature
 
-        // Faces (largest first) and the horizon, from Vision.
-        let faces = VisionDetector.faceBoxes(in: image)
+        // Faces (largest first, with eye points when Vision finds them) and the horizon.
+        let faces = VisionDetector.faces(in: image)
         let horizon = VisionDetector.horizonDegrees(in: image)
-        let faceAreaFraction = faces.first.map { Float($0.width * $0.height) } ?? 0
+        let mainFace = faces.first
+        let faceAreaFraction = mainFace.map { Float($0.box.width * $0.box.height) } ?? 0
 
         if analysisCount % Self.classifyEvery == 1 {
             labels = SceneClassifier.classifyLabels(in: image)
         }
 
-        // Exposure: judge the subject (the largest face, else the centre) rather than the average of the frame.
-        let subjectRegion = faces.first.map { box in
-            CGRect(
-                x: extent.minX + box.minX * extent.width,
-                y: extent.minY + box.minY * extent.height,
-                width: box.width * extent.width,
-                height: box.height * extent.height
+        // Brightness of the frame and of the subject: the largest face, or the centre when there is none.
+        let subjectRegion: CGRect
+        if let face = mainFace {
+            subjectRegion = CGRect(
+                x: extent.minX + face.box.minX * extent.width,
+                y: extent.minY + face.box.minY * extent.height,
+                width: face.box.width * extent.width,
+                height: face.box.height * extent.height
             )
-        } ?? extent.insetBy(dx: extent.width * 0.25, dy: extent.height * 0.25)
+        } else {
+            subjectRegion = extent.insetBy(dx: extent.width * 0.25, dy: extent.height * 0.25)
+        }
 
         let frameHistogram = ExposureAnalyzer.histogram(of: image, context: context)
         let subjectHistogram = ExposureAnalyzer.histogram(of: image, in: subjectRegion, context: context)
-        let exposure = frameHistogram.map { ExposureAnalyzer.assess(frame: $0, subject: subjectHistogram) }
-
         let frameMean = frameHistogram?.mean ?? 0.5
-        let rawScene = SceneClassifier.scene(
+        let warmth = ColorProbe.redMinusBlue(of: image, context: context)
+        let warm = warmth.map { SceneClassifier.isWarm(redMinusBlue: $0) } ?? false
+
+        // Scene: labels and faces first, then brightness and colour cast as a low-confidence fallback.
+        let sceneDecision = SceneClassifier.decide(
             labels: labels,
             faceCount: faces.count,
             faceAreaFraction: faceAreaFraction,
-            frameMean: frameMean
+            frameMean: frameMean,
+            redMinusBlue: warmth
         )
-        let scene = sceneStable.ingest(rawScene) ?? .general
+        let scene = sceneStable.ingest(sceneDecision.kind) ?? .general
 
+        // Exposure: judge the subject, with a target that suits the scene and protects highlights and atmosphere.
+        let exposure = frameHistogram.map {
+            ExposureAnalyzer.assess(frame: $0, subject: subjectHistogram, scene: scene, warm: warm)
+        }
+        let lighting = SceneClassifier.lighting(
+            frameMean: frameMean,
+            highlightClipping: frameHistogram?.highlightClipping ?? 0,
+            shadowClipping: frameHistogram?.shadowClipping ?? 0,
+            subjectMean: subjectHistogram?.mean
+        )
+
+        // Lens: the best zoom for the scene, stabilised so it doesn't flip.
         let (currentZoom, presets) = lock.withLock { (zoom, zoomPresets) }
         let wantedZoom = LensSelector.recommendedZoom(
             scene: scene,
             faceAreaFraction: faceAreaFraction,
             current: currentZoom,
-            presets: presets
+            presets: presets,
+            isConfident: sceneDecision.isConfident
         )
         let recommendedZoom = zoomStable.ingest(wantedZoom)
 
-        let composition = CompositionAnalyzer.advice(
+        // Focus: the eye midpoint when visible, otherwise the face centre.
+        let focusTarget = mainFace.map { $0.eyeCenter ?? CGPoint(x: $0.box.midX, y: $0.box.midY) }
+
+        // Readiness: motion, focus and exposure settling, and light level (low light needs a longer calm period).
+        let lowLight = frameMean < SceneClassifier.nightMean * 1.5
+        let readinessNow = readiness.ingest(motion: motion, settling: settling, lowLight: lowLight)
+
+        // Guidance: one message, stabilised so it doesn't flicker.
+        let advice = GuidanceEngine.advice(
+            readiness: readinessNow,
             horizonDegrees: horizon,
-            faceCount: faces.count,
-            faceCenterX: faces.first.map { Float($0.midX) }
+            faces: faces.map(\.box),
+            scene: scene
         )
+        let guidance = guidanceStable.ingest(advice) ?? Guidance.none
 
         return PhotoDecision(
             scene: scene,
-            lighting: SceneClassifier.lighting(
-                frameMean: frameMean,
-                highlightClipping: frameHistogram?.highlightClipping ?? 0,
-                shadowClipping: frameHistogram?.shadowClipping ?? 0
-            ),
+            sceneIsConfident: sceneDecision.isConfident,
+            lighting: lighting,
             exposure: exposure,
             recommendedZoom: recommendedZoom,
-            composition: composition,
-            readiness: readiness.ingest(motion: motion, settling: settling),
+            focusTarget: focusTarget,
+            guidance: guidance,
+            readiness: readinessNow,
             faceCount: faces.count
         )
     }
@@ -177,16 +206,46 @@ final class PhotographyDirector: @unchecked Sendable {
     }
 }
 
+/// A detected face: its box (normalised, origin bottom-left) and the eye midpoint when landmarks are found.
+struct FaceInfo: Sendable {
+    let box: CGRect
+    let eyeCenter: CGPoint?
+}
+
 /// Vision wrappers that return plain values, so the analysis above stays easy to follow.
 enum VisionDetector {
-    /// Face bounding boxes in normalised image coordinates (origin bottom-left), largest first.
-    static func faceBoxes(in image: CIImage) -> [CGRect] {
-        let request = VNDetectFaceRectanglesRequest()
+    /// Faces, largest first. Uses the landmarks request so eyes come from the same pass.
+    static func faces(in image: CIImage) -> [FaceInfo] {
+        let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(ciImage: image, orientation: .up, options: [:])
         guard (try? handler.perform([request])) != nil else { return [] }
         return (request.results ?? [])
-            .map(\.boundingBox)
-            .sorted { $0.width * $0.height > $1.width * $1.height }
+            .sorted { $0.boundingBox.width * $0.boundingBox.height > $1.boundingBox.width * $1.boundingBox.height }
+            .map { FaceInfo(box: $0.boundingBox, eyeCenter: eyeCenter(of: $0)) }
+    }
+
+    /// Midpoint of the two eyes in normalised image coordinates, when landmarks are available.
+    private static func eyeCenter(of face: VNFaceObservation) -> CGPoint? {
+        guard
+            let landmarks = face.landmarks,
+            let leftEye = landmarks.leftEye,
+            let rightEye = landmarks.rightEye,
+            let left = centre(of: leftEye),
+            let right = centre(of: rightEye)
+        else { return nil }
+
+        // Landmark points are normalised to the face's bounding box, so map them back into image coordinates.
+        let box = face.boundingBox
+        let midX = (left.x + right.x) / 2
+        let midY = (left.y + right.y) / 2
+        return CGPoint(x: box.minX + midX * box.width, y: box.minY + midY * box.height)
+    }
+
+    private static func centre(of region: VNFaceLandmarkRegion2D) -> CGPoint? {
+        let points = region.normalizedPoints
+        guard !points.isEmpty else { return nil }
+        let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
     }
 
     /// Horizon tilt in degrees (signed), or nil when no horizon is visible.

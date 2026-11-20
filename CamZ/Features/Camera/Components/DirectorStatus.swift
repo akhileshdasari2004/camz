@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// The AI indicator and composition guidance, shown over the bottom of the viewfinder in Auto mode.
+/// The AI indicator and the single piece of guidance, shown over the bottom of the viewfinder in Auto mode.
 struct DirectorStatus: View {
     let decision: PhotoDecision
 
     var body: some View {
         VStack(spacing: 8) {
-            if let message = decision.composition.message {
+            if let message = decision.guidance.message {
                 Text(message)
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.black)
@@ -38,7 +38,7 @@ struct DirectorStatus: View {
             .background(.black.opacity(0.45), in: Capsule())
         }
         .padding(.bottom, 12)
-        .animation(.easeInOut(duration: 0.2), value: decision.composition)
+        .animation(.easeInOut(duration: 0.2), value: decision.guidance)
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(Brand.name) AI: \(summary)")

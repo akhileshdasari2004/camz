@@ -56,16 +56,18 @@ enum CaptureReadiness: Equatable, Sendable {
 }
 
 /// Decides when the preview has been still long enough that a shot will be sharp and correctly exposed.
-/// Pure: it only counts calm frames, so the capture code decides what to do while waiting.
+/// Pure: it only counts calm frames. The capture code decides what to do while it waits, and the wait is bounded.
 struct CaptureDecisionEngine: Sendable {
     /// Mean brightness change (see `FrameMotion`) above which the scene counts as moving.
     var motionThreshold: Float = 0.02
-    /// Consecutive calm frames required before a shot counts as steady.
+    /// Consecutive calm frames required before a shot counts as steady, in good light.
     var requiredCalmFrames = 3
+    /// Extra calm frames required in low light, where exposure times are longer and blur risk is higher.
+    var lowLightExtraFrames = 2
 
     private(set) var calmFrames = 0
 
-    mutating func ingest(motion: Float, settling: Bool) -> CaptureReadiness {
+    mutating func ingest(motion: Float, settling: Bool, lowLight: Bool = false) -> CaptureReadiness {
         if settling {
             calmFrames = 0
             return .settling
@@ -75,6 +77,7 @@ struct CaptureDecisionEngine: Sendable {
             return .moving
         }
         calmFrames += 1
-        return calmFrames >= requiredCalmFrames ? .steady : .moving
+        let required = lowLight ? requiredCalmFrames + lowLightExtraFrames : requiredCalmFrames
+        return calmFrames >= required ? .steady : .moving
     }
 }

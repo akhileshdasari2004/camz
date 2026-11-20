@@ -36,6 +36,15 @@ enum CameraMath {
         return CGPoint(x: clamp01(v), y: clamp01(1 - u))
     }
 
+    /// Converts a normalised point in the upright frame (Vision convention: origin bottom-left) into
+    /// AVFoundation point-of-interest space. Same mapping as `pointOfInterest(forTap:)` for a full, uncropped frame.
+    static func pointOfInterest(forNormalizedImagePoint point: CGPoint, isMirrored: Bool) -> CGPoint {
+        var u = clamp01(point.x)        // left → right in the upright image
+        let v = clamp01(1 - point.y)    // top → bottom in the upright image
+        if isMirrored { u = 1 - u }
+        return CGPoint(x: clamp01(v), y: clamp01(1 - u))
+    }
+
     static func clampedZoom(_ factor: CGFloat, min minFactor: CGFloat, max maxFactor: CGFloat) -> CGFloat {
         Swift.min(Swift.max(factor, minFactor), maxFactor)
     }
