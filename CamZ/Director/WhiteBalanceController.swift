@@ -34,49 +34,77 @@ enum WhiteBalanceDecision: Equatable, Sendable {
     case lock(kelvin: Double, reason: String)
 }
 
-/// Decides when a white-balance lock is justified. Pure, so the rules are tested without a camera.
+/// Decides when a white-balance lock is justified, and holds it steadily once it is set. Pure, so the rules are tested.
 ///
-/// A lock is considered only when all of these hold: the light has been measured steadily for a while, the scene is
-/// atmospheric (sunset or night, where warm light is part of the picture), and no people are in frame, because skin
-/// tones are safer under continuous auto. The locked target keeps half of the warmth, so a sunset stays warm.
+/// A lock is set only when all of these hold: the light has been measured steadily for a while, the scene is atmospheric
+/// (sunset or night, where warm light is part of the picture), and no people are in frame, because skin tones are safer
+/// under continuous auto. The locked target keeps half of the warmth, so a sunset stays warm.
+///
+/// Once set, the lock is hysteretic. Ordinary variation in the light does not release it. It is released only after the
+/// light has failed the hold rules for `releaseAfterFrames` frames in a row. That is what stops the lock from oscillating.
 struct WhiteBalanceController: Sendable {
     /// Estimates this close to neutral (about 6500 K) do not justify a lock: continuous auto already handles them.
     static let neutralKelvin: Double = 6500
     static let neutralBand: Double = 900
+    /// While locked, a lock is held through estimates this close to neutral. Narrower than `neutralBand`, so it is sticky.
+    static let holdBand: Double = 450
     /// Frames that must agree before a lock is considered.
     static let requiredStableFrames = 8
-    /// Largest spread, in kelvin, across the stable window. A wider spread means the light is changing.
+    /// Largest spread, in kelvin, across the stable window before a lock is set. A wider spread means the light is changing.
     static let maxStableSpread: Double = 200
+    /// Wider spread a held lock tolerates. Ordinary variation keeps it; a real change of light releases it.
+    static let maxHeldSpread: Double = 400
     /// Share of the warmth kept in a lock. 0.5 keeps half, so a warm scene stays warm without a strong cast.
     static let warmthKept: Double = 0.5
+    /// Frames that must fail the hold rules in a row before a held lock is released.
+    static let releaseAfterFrames = 30
 
     /// Set false while the feature is unproven on a device. The decision then never locks.
     var lockingEnabled: Bool = true
 
     private(set) var window: [Double] = []
+    private(set) var isLocked = false
+    private(set) var lockedKelvin: Double?
+    private var framesOutsideHold = 0
 
-    /// Feeds one analysed frame. Pass nil for the colour temperature when a frame cannot be measured; that breaks the window.
+    /// Feeds one analysed frame. Pass nil for the colour temperature when a frame cannot be measured.
     mutating func ingest(kelvin: Double?, atmosphericScene: Bool, faceCount: Int) -> WhiteBalanceDecision {
+        guard lockingEnabled else {
+            release()
+            return .continuousAuto(reason: "White-balance locking is off.")
+        }
         guard let kelvin, kelvin.isFinite else {
             window.removeAll()
-            return .continuousAuto(reason: "Light not measured yet.")
+            return stepHeld(holds: false, reason: "Light not measured yet.")
         }
         window.append(kelvin)
         if window.count > Self.requiredStableFrames {
             window.removeFirst(window.count - Self.requiredStableFrames)
         }
-        guard lockingEnabled else {
-            return .continuousAuto(reason: "White-balance locking is off.")
+        let spread = (window.max() ?? 0) - (window.min() ?? 0)
+        let median = window.sorted()[window.count / 2]
+        let warm = abs(median - Self.neutralKelvin) > Self.neutralBand
+
+        if isLocked {
+            // Skin tones take priority over stability: a person in frame releases the lock at once.
+            if faceCount > 0 {
+                release()
+                return .continuousAuto(reason: "People are in frame, so skin tones return to auto.")
+            }
+            let holds = spread <= Self.maxHeldSpread
+                && abs(median - Self.neutralKelvin) > Self.holdBand
+                && atmosphericScene
+                && faceCount == 0
+            return stepHeld(holds: holds, reason: holdReason(spread: spread, atmospheric: atmosphericScene, faces: faceCount))
         }
+
         guard window.count == Self.requiredStableFrames else {
             return .continuousAuto(reason: "Measuring the light.")
         }
-        let spread = (window.max() ?? 0) - (window.min() ?? 0)
         guard spread <= Self.maxStableSpread else {
             return .continuousAuto(reason: "The light is changing.")
         }
-        let median = window.sorted()[window.count / 2]
-        guard abs(median - Self.neutralKelvin) > Self.neutralBand else {
+        guard warm else {
             return .continuousAuto(reason: "Auto white balance already handles this light.")
         }
         guard atmosphericScene else {
@@ -85,7 +113,39 @@ struct WhiteBalanceController: Sendable {
         guard faceCount == 0 else {
             return .continuousAuto(reason: "People are in frame, so skin tones stay on auto.")
         }
-        let target = Self.neutralKelvin + Self.warmthKept * (median - Self.neutralKelvin)
-        return .lock(kelvin: target, reason: "Stable warm light at sunset or night: locked to keep its mood.")
+        isLocked = true
+        lockedKelvin = Self.neutralKelvin + Self.warmthKept * (median - Self.neutralKelvin)
+        framesOutsideHold = 0
+        return .lock(kelvin: lockedKelvin ?? median, reason: "Stable warm light at sunset or night: locked to keep its mood.")
+    }
+
+    /// Moves a held lock on by one frame. Keeps it while the hold rules hold, and releases it only after a run of failures.
+    private mutating func stepHeld(holds: Bool, reason: String) -> WhiteBalanceDecision {
+        guard isLocked, let kelvin = lockedKelvin else {
+            return .continuousAuto(reason: reason)
+        }
+        if holds {
+            framesOutsideHold = 0
+            return .lock(kelvin: kelvin, reason: "Stable warm light: lock held.")
+        }
+        framesOutsideHold += 1
+        if framesOutsideHold >= Self.releaseAfterFrames {
+            release()
+            return .continuousAuto(reason: reason)
+        }
+        return .lock(kelvin: kelvin, reason: "A brief change in the light: lock held for now.")
+    }
+
+    private mutating func release() {
+        isLocked = false
+        lockedKelvin = nil
+        framesOutsideHold = 0
+    }
+
+    private func holdReason(spread: Double, atmospheric: Bool, faces: Int) -> String {
+        if faces > 0 { return "People are in frame, so skin tones return to auto." }
+        if !atmospheric { return "The scene is no longer atmospheric, so auto returns." }
+        if spread > Self.maxHeldSpread { return "The light is changing." }
+        return "Stable warm light: lock held."
     }
 }

@@ -286,23 +286,24 @@ final class CaptureFeatureRulesTests: XCTestCase {
 
     func testTopBarFitsEachCommonIPhoneWidth() {
         // The bar's own width is the screen width minus the 20-point padding on each side.
-        let regular = TopBarLayout.Style(buttonSize: 40, spacing: 6, showsWordmark: true)
-        let compact = TopBarLayout.Style(buttonSize: 34, spacing: 4, showsWordmark: true)
-        let compactNoWordmark = TopBarLayout.Style(buttonSize: 34, spacing: 4, showsWordmark: false)
-        XCTAssertEqual(TopBarLayout.style(availableWidth: 430 - 40, rightButtons: 5), regular)
-        XCTAssertEqual(TopBarLayout.style(availableWidth: 390 - 40, rightButtons: 5), regular)
-        XCTAssertEqual(TopBarLayout.style(availableWidth: 375 - 40, rightButtons: 5), compact)
-        XCTAssertEqual(TopBarLayout.style(availableWidth: 320 - 40, rightButtons: 5), compactNoWordmark)
+        let full = TopBarLayout.Style(buttonSize: 44, spacing: 4, showsWordmark: true)
+        let narrow = TopBarLayout.Style(buttonSize: 44, spacing: 4, showsWordmark: false)
+        XCTAssertEqual(TopBarLayout.style(availableWidth: 430 - 40, rightButtons: 3), full)
+        XCTAssertEqual(TopBarLayout.style(availableWidth: 390 - 40, rightButtons: 3), full)
+        XCTAssertEqual(TopBarLayout.style(availableWidth: 375 - 40, rightButtons: 3), full)
+        XCTAssertEqual(TopBarLayout.style(availableWidth: 320 - 40, rightButtons: 3), full, "the smallest iPhone keeps the wordmark")
+        XCTAssertEqual(TopBarLayout.style(availableWidth: 300 - 40, rightButtons: 3), narrow, "narrower than any iPhone drops the wordmark")
     }
 
     func testTopBarNeverOverflowsItsWidth() {
         // The smallest iPhone is 320 points wide, so the layout is checked from there up.
         for width in stride(from: CGFloat(320), through: 440, by: 5) {
-            let style = TopBarLayout.style(availableWidth: width - 40, rightButtons: 5)
+            let style = TopBarLayout.style(availableWidth: width - 40, rightButtons: TopBarLayout.rightButtonCount)
+            XCTAssertGreaterThanOrEqual(style.buttonSize, TopBarLayout.minimumTouchTarget, "width \(width)")
             let needed = TopBarLayout.contentWidth(
                 buttonSize: style.buttonSize,
                 spacing: style.spacing,
-                rightButtons: 5,
+                rightButtons: TopBarLayout.rightButtonCount,
                 centreWidth: style.showsWordmark ? TopBarLayout.wordmarkWidth : TopBarLayout.zoomReadoutWidth
             )
             XCTAssertLessThanOrEqual(needed, width - 40 - TopBarLayout.safetyGap, "width \(width)")

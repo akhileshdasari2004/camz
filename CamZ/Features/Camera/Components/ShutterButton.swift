@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ShutterButton: View {
     let isBusy: Bool
+    var label = "Take photo"
     let action: () -> Void
 
     @State private var isPressed = false
@@ -21,7 +22,7 @@ struct ShutterButton: View {
         }
         .buttonStyle(PressTrackingStyle(isPressed: $isPressed))
         .disabled(isBusy)
-        .accessibilityLabel("Take photo")
+        .accessibilityLabel(label)
     }
 }
 

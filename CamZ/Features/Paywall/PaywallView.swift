@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The Cam Z Pro offer. Prices, periods and status come from StoreKit. The free camera stays free.
+/// The Cam Z Pro offer. Names, prices, periods and status come from the store. The free camera stays free.
 struct PaywallView: View {
     @Environment(\.dismiss) private var dismiss
     let store: StoreService
@@ -19,9 +19,10 @@ struct PaywallView: View {
                         Text(message)
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                            .accessibilityLabel("Purchase status: \(message)")
                     }
                     restore
-                    fineprint
+                    disclosures
                     legalLinks
                 }
                 .padding(24)
@@ -31,6 +32,7 @@ struct PaywallView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
+                        .frame(minWidth: 44, minHeight: 44)
                 }
             }
         }
@@ -40,6 +42,7 @@ struct PaywallView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Cam Z Pro")
                 .font(.largeTitle.bold())
+                .accessibilityAddTraits(.isHeader)
             Text("The AI director stays free. Pro adds the features below.")
                 .font(.body)
                 .foregroundStyle(.secondary)
@@ -48,11 +51,11 @@ struct PaywallView: View {
 
     private var features: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(ProFeature.allCases, id: \.self) { feature in
+            ForEach([ProFeature.handsFree, .bestOfThree, .manualControls], id: \.self) { feature in
                 Label(feature.title, systemImage: "checkmark.circle.fill")
                     .font(.body)
             }
-            Text("Free: AI exposure, focus, framing guidance, lens choice and the manual shutter.")
+            Text("Free: AI exposure, focus, framing guidance, lens choice, the manual shutter, saving photos, and RAW, HDR and night capture.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -66,42 +69,42 @@ struct PaywallView: View {
         } else {
             switch store.loadState {
             case .notConfigured:
-                Text("Pro is not set up in this build yet.")
+                Text("Pro is not set up in this build yet. The camera works without it.")
                     .font(.body)
                     .foregroundStyle(.secondary)
             case .loading:
                 ProgressView()
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .accessibilityLabel("Loading Pro options")
             case .unavailable:
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("The Pro options could not be loaded. Check your connection and try again.")
+                    Text("The Pro options could not be loaded. Check your connection and try again. The camera works without them.")
                         .font(.body)
                         .foregroundStyle(.secondary)
                     Button("Try again") {
                         Task { await store.loadProducts() }
                     }
+                    .frame(minHeight: 44)
                 }
             case .ready:
                 VStack(spacing: 12) {
                     ForEach(store.products) { product in
                         Button {
-                            Task { await store.purchase(product) }
+                            Task { await store.purchase(productID: product.id) }
                         } label: {
                             VStack(spacing: 4) {
-                                Text(product.displayName)
+                                Text(product.name)
                                     .font(.headline)
-                                Text([product.displayPrice, StoreService.periodText(for: product)]
-                                    .filter { !$0.isEmpty }
-                                    .joined(separator: " "))
+                                Text([product.price, product.period].filter { !$0.isEmpty }.joined(separator: " "))
                                     .font(.subheadline)
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
+                            .frame(maxWidth: .infinity, minHeight: 56)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Color.accentColor)
                         .foregroundStyle(.black)
                         .disabled(store.isWorking)
+                        .accessibilityLabel("\(product.name), \([product.price, product.period].filter { !$0.isEmpty }.joined(separator: " "))")
                     }
                 }
             }
@@ -113,7 +116,14 @@ struct PaywallView: View {
             Task { await store.restore() }
         }
         .disabled(store.isWorking)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 44)
+    }
+
+    /// Subscription terms required before a subscription can be sold.
+    private var disclosures: some View {
+        Text("Cam Z Pro is an auto-renewing subscription. Payment is charged to your Apple ID when you confirm. The subscription renews at the price shown unless it is cancelled at least 24 hours before the end of the current period. Manage or cancel it in Settings > Apple ID > Subscriptions. Free features stay free without a subscription.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     @ViewBuilder
@@ -128,12 +138,7 @@ struct PaywallView: View {
                 }
             }
             .font(.footnote)
+            .frame(minHeight: 44)
         }
-    }
-
-    private var fineprint: some View {
-        Text("Payment is charged to your Apple ID. A subscription renews automatically unless it is cancelled at least 24 hours before the end of the current period. Manage it in Settings > Apple ID > Subscriptions.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
     }
 }

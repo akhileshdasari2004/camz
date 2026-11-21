@@ -150,19 +150,31 @@ final class ComputedPhotoTests: XCTestCase {
 
     // MARK: Ghosting
 
-    func testAMovingObjectComesFromTheReferenceFrame() throws {
-        let normal = makeImage { x, y in self.baseValue(x, y) }
-        // The dark frame has a bright object where the normal frame shows only background.
-        let darkWithObject = makeImage { x, y in
-            let inObject = (40..<80).contains(x) && (80..<120).contains(y)
-            return inObject ? 0.9 : self.baseValue(x, y) * 0.35
+    func testAMovingObjectComesFromTheReferenceFrame() {
+        // One frame has a bright object that the reference frame does not show. The weights are computed directly on the
+        // pixels, so this tests the ghost rule itself and does not depend on what alignment finds in the scene.
+        let side = 128
+        var withObject = [Float](repeating: 1, count: side * side * 4)
+        var background = [Float](repeating: 1, count: side * side * 4)
+        for y in 0..<side {
+            for x in 0..<side {
+                let index = (y * side + x) * 4
+                let base: Float = x < side / 2 ? 0.2 : 0.7
+                let inObject = (20..<40).contains(x) && (40..<60).contains(y)
+                let value = inObject ? Float(0.95) : base
+                for channel in 0..<3 {
+                    withObject[index + channel] = value
+                    background[index + channel] = base
+                }
+            }
         }
-        let fused = try XCTUnwrap(FrameMerge.exposureFusion(frames: [darkWithObject, normal], reference: 1, context: context))
-        let values = WorkingPixels.read(fused, width: 128, height: 128, context: context)!
+        let weights = FusionWeights.compute(pixels: [withObject, background], width: side, height: side, reference: 1)
 
-        let inside = mean(values, x: 20..<40, y: 40..<60)
-        let normalInside = mean(WorkingPixels.read(normal, width: 128, height: 128, context: context)!, x: 20..<40, y: 40..<60)
-        XCTAssertEqual(inside, normalInside, accuracy: 0.03, "the object must not ghost into the result")
+        let objectPixel = 50 * side + 30
+        let backgroundPixel = 10 * side + 10
+        XCTAssertLessThan(weights[0][objectPixel], 0.05, "the object frame is not trusted where it differs from the reference")
+        XCTAssertGreaterThan(weights[1][objectPixel], 0.95, "the reference frame supplies the object's area")
+        XCTAssertEqual(weights[0][backgroundPixel] + weights[1][backgroundPixel], 1, accuracy: 0.001, "weights sum to one")
     }
 
     // MARK: Night averaging

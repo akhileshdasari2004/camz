@@ -22,24 +22,35 @@ enum ExposureBias {
 enum FrameAligner {
     /// The transform that moves `target` onto `reference`, or nil when Vision cannot align the pair.
     static func transform(for target: CIImage, onto reference: CIImage) -> CGAffineTransform? {
-        let request = VNTranslationalImageRegistrationRequest(targetedCIImage: target, options: [:])
-        let handler = VNImageRequestHandler(ciImage: reference, options: [:])
-        guard (try? handler.perform([request])) != nil, let observation = request.results?.first else { return nil }
-        return observation.alignmentTransform
+        // Vision allocates heavily per request. A pool per frame releases that memory before the next frame.
+        autoreleasepool { () -> CGAffineTransform? in
+            let request = VNTranslationalImageRegistrationRequest(targetedCIImage: target, options: [:])
+            let handler = VNImageRequestHandler(ciImage: reference, options: [:])
+            guard (try? handler.perform([request])) != nil, let observation = request.results?.first else { return nil }
+            return observation.alignmentTransform
+        }
     }
+
+    /// Largest shift accepted, as a share of the shorter side. Handheld shake is a few pixels, so a larger shift is a false match,
+    /// such as a repeating pattern, and the merge is refused rather than cropped down to almost nothing.
+    static let maximumShiftFraction: CGFloat = 0.1
 
     /// Aligned frames, all cropped to the area every frame covers and moved to the origin, so later steps share one
     /// coordinate system. Nil when a frame cannot be aligned or the shared area is too small.
     static func aligned(_ frames: [CIImage], reference: Int) -> [CIImage]? {
         guard frames.count >= 2, frames.indices.contains(reference) else { return nil }
         let anchor = frames[reference]
+        let maximumShift = maximumShiftFraction * min(anchor.extent.width, anchor.extent.height)
         var moved: [CIImage] = []
         for (index, frame) in frames.enumerated() {
+            // A stopped capture gives up between frames rather than finishing the whole merge.
+            guard !Task.isCancelled else { return nil }
             if index == reference {
                 moved.append(frame)
                 continue
             }
             guard let transform = transform(for: frame, onto: anchor) else { return nil }
+            guard abs(transform.tx) <= maximumShift, abs(transform.ty) <= maximumShift else { return nil }
             moved.append(frame.transformed(by: transform))
         }
         let common = moved.dropFirst().reduce(moved[0].extent) { $0.intersection($1.extent) }
@@ -172,13 +183,17 @@ enum FrameMerge {
 
         var pixels: [[Float]] = []
         for frame in aligned {
-            guard let values = WorkingPixels.read(frame, width: width, height: height, context: context) else { return nil }
+            guard !Task.isCancelled else { return nil }
+            // Each frame is rendered inside its own pool, so the working copies do not pile up across frames.
+            guard let values = autoreleasepool(invoking: { WorkingPixels.read(frame, width: width, height: height, context: context) }) else { return nil }
             pixels.append(values)
         }
+        guard !Task.isCancelled else { return nil }
         let weights = FusionWeights.compute(pixels: pixels, width: width, height: height, reference: reference)
 
         var total: CIImage?
         for (index, frame) in aligned.enumerated() {
+            guard !Task.isCancelled else { return nil }
             let weightImage = WorkingPixels.image(fromValues: weights[index], width: width, height: height)
                 .transformed(by: CGAffineTransform(scaleX: extent.width / CGFloat(width), y: extent.height / CGFloat(height)))
             guard let product = CIFilter(name: "CIMultiplyBlendMode", parameters: [
@@ -203,6 +218,7 @@ enum FrameMerge {
         let scale = 1 / CGFloat(aligned.count)
         var total: CIImage?
         for frame in aligned {
+            guard !Task.isCancelled else { return nil }
             let scaled = frame.applyingFilter("CIColorMatrix", parameters: [
                 "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
@@ -236,8 +252,9 @@ enum ComputedPhoto {
         context: CIContext
     ) -> Data? {
         let images = decode(frames)
-        guard images.count == frames.count, reference < images.count else { return nil }
+        guard images.count == frames.count, reference < images.count, !Task.isCancelled else { return nil }
         guard let merged = FrameMerge.exposureFusion(frames: images, reference: reference, context: context) else { return nil }
+        guard !Task.isCancelled else { return nil }
         return finish(merged, look: look, iso: iso, highlightClipping: highlightClipping, shadowClipping: shadowClipping,
                       metadataFrom: frames[reference], context: context)
     }
@@ -252,7 +269,8 @@ enum ComputedPhoto {
         context: CIContext
     ) -> Data? {
         let images = decode(frames)
-        guard images.count == frames.count, let averaged = FrameMerge.average(frames: images) else { return nil }
+        guard images.count == frames.count, !Task.isCancelled, let averaged = FrameMerge.average(frames: images) else { return nil }
+        guard !Task.isCancelled else { return nil }
         return finish(averaged, look: look, iso: iso, highlightClipping: highlightClipping, shadowClipping: shadowClipping,
                       metadataFrom: frames[0], context: context)
     }
@@ -288,8 +306,11 @@ enum ComputedPhoto {
         let properties = metadata(of: reference)
         let stamped = output.settingProperties(PhotoCaptureProcessor.metadata(from: properties))
         let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        return context.heifRepresentation(of: stamped, format: .RGBA8, colorSpace: colorSpace, options: [:])
-            ?? context.jpegRepresentation(of: stamped, colorSpace: colorSpace, options: [:])
+        // Encoding allocates the most memory of the whole pipeline, so it runs inside its own pool.
+        return autoreleasepool { () -> Data? in
+            context.heifRepresentation(of: stamped, format: .RGBA8, colorSpace: colorSpace, options: [:])
+                ?? context.jpegRepresentation(of: stamped, colorSpace: colorSpace, options: [:])
+        }
     }
 
     private static func metadata(of data: Data) -> [String: Any] {

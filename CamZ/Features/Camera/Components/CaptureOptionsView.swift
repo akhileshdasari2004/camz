@@ -39,6 +39,16 @@ struct CaptureOptionsView: View {
                 Section {
                     Toggle("Grid", isOn: $model.showGrid)
                 }
+
+                #if DEBUG
+                Section {
+                    Toggle("Unlock Cam Z Pro for testing", isOn: developmentUnlockBinding)
+                } header: {
+                    Text("Development")
+                } footer: {
+                    Text("Debug builds only. Lets every Pro feature run on this device without a purchase. Release builds never read this setting.")
+                }
+                #endif
             }
             .navigationTitle("Capture options")
             .navigationBarTitleDisplayMode(.inline)
@@ -50,4 +60,13 @@ struct CaptureOptionsView: View {
         }
         .presentationDetents([.medium, .large])
     }
+
+    #if DEBUG
+    private var developmentUnlockBinding: Binding<Bool> {
+        Binding(
+            get: { model.store.developmentUnlockOn },
+            set: { model.store.developmentUnlockOn = $0 }
+        )
+    }
+    #endif
 }

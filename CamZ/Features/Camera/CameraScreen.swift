@@ -43,6 +43,9 @@ struct CameraScreen: View {
         .sheet(isPresented: optionsBinding) {
             CaptureOptionsView(model: model)
         }
+        .sheet(isPresented: reviewBinding) {
+            PhotoReviewView(model: model)
+        }
         .sensoryFeedback(.impact(weight: .medium), trigger: model.captureCount)
         .sensoryFeedback(.selection, trigger: model.filter)
         .sensoryFeedback(.selection, trigger: model.mode)
@@ -59,6 +62,13 @@ struct CameraScreen: View {
         Binding(
             get: { model.isPaywallPresented },
             set: { model.isPaywallPresented = $0 }
+        )
+    }
+
+    private var reviewBinding: Binding<Bool> {
+        Binding(
+            get: { model.isReviewPresented },
+            set: { model.isReviewPresented = $0 }
         )
     }
 
@@ -145,6 +155,15 @@ struct CameraScreen: View {
                         .transition(.opacity)
                 }
 
+                if let progress = model.captureProgress {
+                    CaptureProgressPill(text: progress, canStop: model.canStopProcessing) {
+                        model.cancelProcessing()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 12)
+                    .transition(.opacity)
+                }
+
                 if let interruption = model.interruption {
                     InterruptionOverlay(message: interruption.message)
                         .transition(.opacity)
@@ -152,6 +171,7 @@ struct CameraScreen: View {
             }
             .animation(.easeInOut(duration: 0.25), value: model.interruption)
             .animation(.easeOut(duration: 0.15), value: model.isComparing)
+            .animation(.easeOut(duration: 0.2), value: model.captureProgress)
             .animation(.easeOut(duration: 0.2), value: model.isHandsFreeOn)
             .contentShape(Rectangle())
             .gesture(

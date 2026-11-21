@@ -4,13 +4,10 @@ import SwiftUI
 struct TopBar: View {
     @Bindable var model: CameraViewModel
 
-    /// Controls on the right: auto, hands-free, best of three, exposure and capture options.
-    private let rightButtonCount = 5
-
     var body: some View {
         GeometryReader { geo in
             // Sizes follow the screen width, so every control fits on compact iPhones. See `TopBarLayout`.
-            let style = TopBarLayout.style(availableWidth: geo.size.width, rightButtons: rightButtonCount)
+            let style = TopBarLayout.style(availableWidth: geo.size.width, rightButtons: TopBarLayout.rightButtonCount)
             HStack(spacing: 0) {
                 if model.capabilities.hasFlash {
                     IconButton(systemName: flashIcon, isActive: model.flashMode != .off, label: flashLabel, size: style.buttonSize) {
@@ -50,24 +47,6 @@ struct TopBar: View {
                         size: style.buttonSize
                     ) {
                         withAnimation(.snappy) { model.toggleMode() }
-                    }
-                    IconButton(
-                        systemName: "timer",
-                        isActive: model.isHandsFreeOn,
-                        label: model.isHandsFreeOn ? "Hands-free on" : "Hands-free off",
-                        showsLock: !model.isAllowed(.handsFree),
-                        size: style.buttonSize
-                    ) {
-                        withAnimation(.snappy) { model.toggleHandsFree() }
-                    }
-                    IconButton(
-                        systemName: "square.stack.3d.up",
-                        isActive: model.isBestOfThreeArmed,
-                        label: model.isBestOfThreeArmed ? "Best of three on" : "Best of three off",
-                        showsLock: !model.isAllowed(.bestOfThree),
-                        size: style.buttonSize
-                    ) {
-                        withAnimation(.snappy) { model.toggleBestOfThree() }
                     }
                     IconButton(systemName: "plusminus.circle", isActive: model.showExposure, label: "Exposure", size: style.buttonSize) {
                         withAnimation(.snappy) { model.showExposure.toggle() }
@@ -118,8 +97,8 @@ struct IconButton: View {
     let label: String
     /// Shows a small lock when the feature needs Cam Z Pro.
     var showsLock = false
-    /// Side length in points. Compact screens use a smaller size; see `TopBarLayout`.
-    var size: CGFloat = 40
+    /// Side length in points. Never below the 44-point touch minimum; see `TopBarLayout`.
+    var size: CGFloat = TopBarLayout.minimumTouchTarget
     let action: () -> Void
 
     var body: some View {
@@ -139,6 +118,7 @@ struct IconButton: View {
                     }
                 }
                 .contentTransition(.symbolEffect(.replace))
+                .contentShape(Circle())
         }
         .accessibilityLabel(showsLock ? "\(label), needs Cam Z Pro" : label)
         .accessibilityAddTraits(isActive ? .isSelected : [])

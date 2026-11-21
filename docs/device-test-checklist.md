@@ -83,6 +83,16 @@ Until these steps are done, rows 25 to 28 cannot be run. Leave them blank.
 | 44 | Hands-free session limit | Pro user. Turn hands-free on, point at a steady framed subject, then leave it running with no subject for ten minutes. | After ten minutes hands-free stops with a toast. At most five automatic photos per turn-on. | | |
 | 45 | Best of three, save failure | Pro user. Make the sharpest shot fail to save if you can, such as by denying Photos access partway through. | The toast says the next best was saved, or that none could be saved. Nothing is dropped without a message. | | |
 | 46 | Standard capture without purchase | Free user, default capture options. Tap the shutter. | A photo is saved and no paywall opens. | | |
+| 47 | Review opens from the thumbnail | Take a photo, then tap the thumbnail. | The review opens with the photo and the title "AI-enhanced photo" or "Photo". Done closes it. | | |
+| 48 | Original against AI-enhanced | Take an HDR or night photo. In the review, drag the divider left and right. | Left shows the original, right the enhanced photo. VoiceOver can move the divider with swipe up and down. | | |
+| 49 | Zoom in the review | Pinch to zoom on a standard photo, pan, then double tap. | Zoom stays between 1× and 4×. Pan works only while zoomed. Double tap returns to 1×. | | |
+| 50 | Share a photo | Open the review, tap Share, pick Save to Files. | The file opens with a real type (.jpg or .heic), not a generic name. | | |
+| 51 | Save status and retry | If Photos refuses a save, open the review. | The review says the photo is not saved and offers Retry saving. Retry saves it, or says it still could not. | | |
+| 52 | Top bar on small iPhone | Run on the SE or mini. Check the top bar has the flash, zoom, Auto, Exposure and Options controls, all tappable. | Nothing overlaps. Every control responds to a tap on its full 44-point area. | | |
+| 53 | Mode strip | Tap Hands-free and Best of 3 above the shutter. Check the lock badge on a free account. | Each pill turns on and off. A free account sees the lock and the paywall opens. VoiceOver reads "on" or "off". | | |
+| 54 | Stop AI during a merge | Take an HDR or night photo, then tap the shutter again while "Merging exposures" shows. | The merge stops, the progress pill goes away, and the normal exposure is saved with the reason in the toast. | | |
+| 55 | Shutter during a merge | Start an HDR photo and tap the shutter during the merge. | The shutter stays tappable and is labelled "Stop AI processing". It never freezes. | | |
+| 56 | Debug unlock is absent from release | Install a Release build. Open Capture options. | No "Development" section appears. Pro features keep their normal gating. | | |
 
 ## Stop and report if
 
