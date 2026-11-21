@@ -23,6 +23,8 @@ final class MockCamera: CameraControlling, @unchecked Sendable {
     var captureResult: Result<Data, Error> = .success(Data([0x1]))
     /// Photos returned in order by the next captures, before `captureResult` is used. Lets a test give each shot its own photo.
     var captureQueue: [Data] = []
+    /// Simulated capture time, to test overlapping captures.
+    var captureDelay: UInt64 = 0
 
     // Recorded calls
     private(set) var startCount = 0
@@ -111,6 +113,7 @@ final class MockCamera: CameraControlling, @unchecked Sendable {
     ) async throws -> Data {
         capturedFlashModes.append(flash)
         willCapture()
+        if captureDelay > 0 { try? await Task.sleep(nanoseconds: captureDelay) }
         if !captureQueue.isEmpty { return captureQueue.removeFirst() }
         return try captureResult.get()
     }

@@ -21,4 +21,9 @@ enum ThermalPolicy {
     static func allowsBestOfThree(_ state: ProcessInfo.ThermalState) -> Bool {
         allowsHandsFree(state)
     }
+
+    /// Multi-frame captures (HDR merges and night bursts) are allowed only while the phone is not under thermal pressure.
+    static func allowsComputedCapture(_ state: ProcessInfo.ThermalState) -> Bool {
+        state == .nominal || state == .fair
+    }
 }

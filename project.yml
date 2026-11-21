@@ -55,6 +55,9 @@ targets:
 
 schemes:
   CamZ:
+    run:
+      config: Debug
+      storeKitConfiguration: StoreKit/CamZ.storekit
     build:
       targets:
         CamZ: all

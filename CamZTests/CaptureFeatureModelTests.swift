@@ -196,7 +196,8 @@ final class CaptureFeatureModelTests: XCTestCase {
         await model.captureBestOfThree()
         XCTAssertEqual(library.saved.count, 1)
         XCTAssertEqual(library.saved.first, medium, "the next best shot is saved when the sharpest fails")
-        XCTAssertEqual(model.toast, "The sharpest shot could not be saved, so the next best was saved. The others were discarded.")
+        XCTAssertEqual(model.toast, "The sharpest shot could not be saved and is kept for retry. The next best was saved, and the others were discarded.")
+        XCTAssertEqual(model.unsavedPhotos.count, 1, "the shot that failed to save is kept for retry, never dropped")
     }
 
     func testBestOfThreeSaysSoWhenNoShotCanBeSaved() async {
@@ -208,6 +209,7 @@ final class CaptureFeatureModelTests: XCTestCase {
         XCTAssertTrue(library.saved.isEmpty)
         XCTAssertEqual(model.captureCount, 0)
         XCTAssertTrue(model.toast?.hasPrefix("None of the 3 shots could be saved.") == true, "got \(model.toast ?? "nil")")
+        XCTAssertEqual(model.unsavedPhotos.count, 3, "all three shots are kept for retry")
     }
 
     // MARK: Missing product IDs and the free camera

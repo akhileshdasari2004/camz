@@ -93,6 +93,32 @@ protocol ProAccessing: AnyObject {
     var isPro: Bool { get }
 }
 
+/// Development access, so every feature can be tested in DEBUG builds without a purchase. It is compiled out of release
+/// builds: the store's answer is the only way to Pro in a shipped app.
+enum DevelopmentAccess {
+    /// True only in DEBUG builds.
+    static var isAvailableInThisBuild: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// Default for the development switch: on in DEBUG builds, so features can be tested straight away.
+    static var unlockByDefault: Bool { isAvailableInThisBuild }
+
+    static let unlockKey = "camz.dev.unlockPro"
+}
+
+/// Decides whether Pro applies. The store answer is the production rule. The development unlock adds a path only in DEBUG
+/// builds, and only while its switch is on.
+enum ProAccessResolver {
+    static func effectivePro(storeIsPro: Bool, developmentUnlockOn: Bool, developmentAllowed: Bool) -> Bool {
+        storeIsPro || (developmentAllowed && developmentUnlockOn)
+    }
+}
+
 /// Used when no store is wired in. Pro is off, and free features keep working.
 @MainActor
 final class NoProAccess: ProAccessing {

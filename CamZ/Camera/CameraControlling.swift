@@ -51,6 +51,8 @@ struct RawCapabilities: Equatable, Sendable {
 /// What one shutter press produced. A plain capture fills `processed`. A RAW capture fills `raw`, and `processed` too when
 /// requested. A computed photo (HDR merge or night average) fills `processed` and keeps the camera's own frame in `original`.
 struct CapturedPhoto: Sendable {
+    /// Identifies this capture, so the review can tell whether the photo on screen has been saved.
+    let id = UUID()
     var processed: Data?
     var raw: Data?
     /// The unprocessed, camera-native frame kept beside a computed photo, so the original can be compared or restored.
