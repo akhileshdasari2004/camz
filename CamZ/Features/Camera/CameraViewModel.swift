@@ -1,6 +1,6 @@
 import AVFoundation
+import Foundation
 import Observation
-import UIKit
 
 @MainActor
 @Observable
@@ -32,11 +32,28 @@ final class CameraViewModel {
     private(set) var isCapturing = false
     private(set) var shutterFlash = false
     private(set) var captureCount = 0
-    private(set) var lastThumbnail: UIImage?
+    private(set) var lastThumbnail: PlatformImage?
     private(set) var focusPoint: CGPoint?
     /// Set while the system has taken the camera away (call, another app, heat).
     private(set) var interruption: CameraInterruption?
     var toast: String?
+
+    /// Pro: the AI shoots by itself after a countdown, only when the shot is steady, framed and well exposed.
+    var isHandsFreeOn: Bool { handsFree.isEnabled }
+    /// Pro: the shutter takes three shots and keeps only the sharpest one with open eyes.
+    private(set) var isBestOfThreeArmed = false
+    /// Which of the three shots is being taken (1…3), while a best-of-three runs.
+    private(set) var bestOfThreeProgress: Int?
+    /// True while the three shots are measured and the best one is chosen.
+    private(set) var isChoosingBestShot = false
+    /// Seconds left before a hands-free shot, while the countdown runs.
+    private(set) var handsFreeCountdown: Int?
+    /// What hands-free is doing right now, in words.
+    private(set) var handsFreeMessage: String?
+    /// Set when a feature needs Cam Z Pro. The screen shows the paywall while it is true.
+    var isPaywallPresented = false
+    /// Thermal state from the public API. Heat slows analysis and pauses the Pro automatic features.
+    private(set) var thermalState: ProcessInfo.ThermalState
 
     var filter: FilterKind = .original {
         didSet {
@@ -61,31 +78,51 @@ final class CameraViewModel {
 
     let renderer: PreviewRenderer?
     let director = PhotographyDirector()
+    /// The Cam Z Pro subscription. The paywall and the launch checks use it.
+    let store: StoreService
     private let camera: CameraControlling
     private let library: PhotoSaving
+    /// Who has Pro: the store in the app, a fixed answer in tests.
+    private let pro: ProAccessing
+    private let clock: @Sendable () -> TimeInterval
     private var zoomAtGestureStart: CGFloat = 1
     private var focusResetTask: Task<Void, Never>?
     /// Decides when a suggested exposure change is applied: agreement first, then spacing and a deadband.
     private var exposureGovernor = ExposureGovernor()
-    /// Decides when autofocus follows the subject. Pauses for a few seconds after a user tap.
+    /// Decides when autofocus follows the subject, and lets go once the subject has been gone for a while.
     private var focusPlanner = FocusPlanner()
+    /// Hands-free AI capture: countdown, pause between shots and a cap.
+    private var handsFree = HandsFreeController()
     private var lastAutoZoomChange = Date.distantPast
     /// When the director last reported. Old or missing decisions mean the AI has stalled.
     private var lastDecisionAt: Date?
     /// Auto leaves zoom alone for a while after the user pinches or picks a lens.
     private var userZoomedAt = Date.distantPast
+    private var thermalObserver: NSObjectProtocol?
 
-    /// Clock for the director's throttles, in wall-clock seconds. Avoids the boot-time API, which needs a privacy declaration.
-    private var throttleClock: TimeInterval { Date.timeIntervalSinceReferenceDate }
+    /// Clock for the director's throttles and hands-free timing, in wall-clock seconds. Avoids the boot-time API, which needs a privacy declaration.
+    private var throttleClock: TimeInterval { clock() }
 
     init(
         camera: CameraControlling = CameraService(),
         library: PhotoSaving = PhotoLibraryService(),
-        renderer: PreviewRenderer? = PreviewRenderer()
+        renderer: PreviewRenderer? = PreviewRenderer(),
+        store: StoreService? = nil,
+        pro: ProAccessing? = nil,
+        clock: @escaping @Sendable () -> TimeInterval = { Date.timeIntervalSinceReferenceDate }
     ) {
+        // Built here rather than in a default argument: the store is main-actor isolated.
+        let resolvedStore = store ?? StoreService()
         self.camera = camera
         self.library = library
         self.renderer = renderer
+        self.store = resolvedStore
+        self.pro = pro ?? resolvedStore
+        self.clock = clock
+        self.thermalState = ProcessInfo.processInfo.thermalState
+
+        director.setAnalysisInterval(ThermalPolicy.analysisInterval(for: thermalState))
+        director.setExposureSnapshotProvider { [camera] in camera.exposureSnapshot() }
 
         camera.onFrame = { image in renderer?.enqueue(image) }
         camera.onAnalysisFrame = { [director] image, settling in
@@ -97,7 +134,17 @@ final class CameraViewModel {
         director.onDecision = { [weak self] decision in
             Task { @MainActor in self?.apply(decision) }
         }
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.thermalChanged() }
+        }
     }
+
+    /// Whether the user has Cam Z Pro. Reads the store, so the screens update when access changes.
+    var isPro: Bool { pro.isPro }
 
     // MARK: Lifecycle
 
@@ -122,12 +169,14 @@ final class CameraViewModel {
     func stop() {
         camera.stop()
         director.setActive(false)
+        disarmHandsFree()
         if status == .running { status = .idle }
     }
 
     // MARK: Controls
 
     func flipCamera() async {
+        disarmHandsFree()
         do {
             capabilities = try await camera.switchCamera()
             setZoom(capabilities.baseZoom)
@@ -191,10 +240,65 @@ final class CameraViewModel {
         camera.setExposureBias(exposureBias)
     }
 
+    /// Switches between Auto and Pro. Pro (manual controls) needs Cam Z Pro; without it, the paywall opens instead.
     func toggleMode() {
-        mode = mode == .auto ? .pro : .auto
-        if mode == .auto { isExposureLocked = false }
+        if mode == .auto {
+            guard EntitlementPolicy.allows(.manualControls, isPro: isPro) else {
+                isPaywallPresented = true
+                return
+            }
+            mode = .pro
+            disarmHandsFree()
+        } else {
+            mode = .auto
+            isExposureLocked = false
+        }
         director.setActive(mode == .auto && status == .running)
+    }
+
+    /// Turns hands-free capture on or off. Turning it on needs Cam Z Pro, Auto mode, a cool phone and a running camera.
+    func toggleHandsFree() {
+        if isHandsFreeOn {
+            disarmHandsFree()
+            return
+        }
+        guard EntitlementPolicy.allows(.handsFree, isPro: isPro) else {
+            isPaywallPresented = true
+            return
+        }
+        guard mode == .auto else {
+            toast = "Hands-free works in Auto mode."
+            return
+        }
+        guard ThermalPolicy.allowsHandsFree(thermalState) else {
+            toast = "Let the phone cool down before hands-free capture."
+            return
+        }
+        guard status == .running, interruption == nil else {
+            toast = "The camera is not ready yet."
+            return
+        }
+        isBestOfThreeArmed = false
+        handsFree.enable()
+        handsFreeMessage = Self.handsFreeText(for: handsFree.state)
+    }
+
+    /// Arms or disarms best of three. While armed, the shutter takes three shots and keeps the sharpest. Needs Cam Z Pro.
+    func toggleBestOfThree() {
+        if isBestOfThreeArmed {
+            isBestOfThreeArmed = false
+            return
+        }
+        guard EntitlementPolicy.allows(.bestOfThree, isPro: isPro) else {
+            isPaywallPresented = true
+            return
+        }
+        guard ThermalPolicy.allowsBestOfThree(thermalState) else {
+            toast = "Let the phone cool down before best of three."
+            return
+        }
+        disarmHandsFree()
+        isBestOfThreeArmed = true
     }
 
     func focus(atTap tap: CGPoint, in size: CGSize) {
@@ -218,8 +322,15 @@ final class CameraViewModel {
 
     // MARK: Capture
 
-    func capture() async {
-        guard status == .running, interruption == nil, !isCapturing else { return }
+    /// The shutter. Routes to best of three when it is armed; otherwise takes one photo, waiting briefly for a steady frame in Auto.
+    /// Returns true when a photo was taken and saved, and false when the shutter was refused or the capture failed.
+    @discardableResult
+    func capture() async -> Bool {
+        if isBestOfThreeArmed {
+            await captureBestOfThree()
+            return false
+        }
+        guard status == .running, interruption == nil, !isCapturing else { return false }
         isComparing = false // always save the look the user chose
         isCapturing = true
         defer { isCapturing = false }
@@ -236,17 +347,94 @@ final class CameraViewModel {
             let data = try await camera.capturePhoto(flash: flashMode) { [weak self] in
                 Task { @MainActor in self?.flashShutter() }
             }
-            captureCount += 1
-            lastThumbnail = await Self.makeThumbnail(from: data)
-            try await library.save(data)
+            try await record(data)
             #if DEBUG
             DeviceLog.capture(waited: waited, outcome: "saved")
             #endif
+            return true
         } catch {
             toast = error.localizedDescription
             #if DEBUG
             DeviceLog.capture(waited: waited, outcome: "failed")
             #endif
+            return false
+        }
+    }
+
+    /// Takes three shots in a row, measures each for sharpness and open eyes, and keeps only the best. The other two are
+    /// discarded. If the shots cannot be scored, the last shot is kept and the toast says so.
+    func captureBestOfThree() async {
+        guard EntitlementPolicy.allows(.bestOfThree, isPro: isPro) else {
+            isPaywallPresented = true
+            return
+        }
+        guard ThermalPolicy.allowsBestOfThree(thermalState) else {
+            toast = "Let the phone cool down before best of three."
+            return
+        }
+        guard status == .running, interruption == nil, !isCapturing else { return }
+        guard flashMode == .off else {
+            toast = "Turn the flash off to use best of three."
+            return
+        }
+        isComparing = false
+        isCapturing = true
+        defer {
+            isCapturing = false
+            bestOfThreeProgress = nil
+            isChoosingBestShot = false
+        }
+
+        if mode == .auto { await waitForSteadyFrame() }
+
+        var shots: [Data] = []
+        for index in 1...3 {
+            bestOfThreeProgress = index
+            do {
+                let data = try await camera.capturePhoto(flash: .off) { [weak self] in
+                    Task { @MainActor in self?.flashShutter() }
+                }
+                shots.append(data)
+            } catch {
+                toast = error.localizedDescription
+                break
+            }
+        }
+        guard !shots.isEmpty else { return }
+
+        bestOfThreeProgress = nil
+        isChoosingBestShot = true
+        let frames = shots
+        let measured = await Task.detached(priority: .userInitiated) {
+            frames.map { ShotAnalyzer.measure($0) }
+        }.value
+        isChoosingBestShot = false
+
+        let scored = measured.enumerated().compactMap { offset, value in value.map { (offset, $0) } }
+        let chosen: Int
+        if let best = BestShotRanker.bestIndex(of: scored.map(\.1)) {
+            chosen = scored[best].0
+        } else {
+            chosen = shots.count - 1
+        }
+        let chosenScore = measured[chosen]
+
+        #if DEBUG
+        DeviceLog.bestOfThree(sharpness: measured.map { $0?.sharpness }, chosen: chosen, eyesOpen: chosenScore?.eyesOpen)
+        #endif
+
+        let count = "\(shots.count) shot\(shots.count == 1 ? "" : "s")"
+        do {
+            try await record(shots[chosen])
+            if scored.isEmpty {
+                toast = "Saved one of \(count). Scoring was unavailable."
+            } else if chosenScore?.eyesOpen == false {
+                toast = "Saved the sharpest of \(count). No shot had open eyes."
+            } else {
+                toast = "Saved the sharpest of \(count). The others were discarded."
+            }
+        } catch {
+            toast = error.localizedDescription
         }
     }
 
@@ -262,25 +450,29 @@ final class CameraViewModel {
         #endif
         guard mode == .auto, status == .running, interruption == nil else { return }
         let now = Date.now
-        let clock = throttleClock
+        let stamp = throttleClock
 
         // Exposure: only after the same direction is suggested twice, at most once a second, and never when locked.
         if !isExposureLocked,
            let delta = decision.exposure?.suggestedBiasDelta,
-           let step = exposureGovernor.propose(delta, now: clock) {
+           let step = exposureGovernor.propose(delta, now: stamp) {
             let target = CameraMath.clampedBias(exposureBias + step, min: capabilities.minBias, max: capabilities.maxBias)
             if target != exposureBias {
                 applyBias(target)
             }
         }
 
-        // Focus: follow the subject's eyes or face, without refocusing loops or fighting a recent tap.
-        if let point = decision.focusTarget,
-           let planned = focusPlanner.target(for: point, now: clock) {
+        // Focus: follow the subject's eyes or face, let go after it has been gone for two seconds, and never fight a tap.
+        switch focusPlanner.command(for: decision.focusTarget, now: stamp) {
+        case .focus(let planned):
             camera.trackFocus(at: CameraMath.pointOfInterest(
                 forNormalizedImagePoint: planned,
                 isMirrored: capabilities.position == .front
             ))
+        case .release:
+            camera.releaseTrackingFocus()
+        case .none:
+            break
         }
 
         // Lens: a smooth ramp to the recommended zoom, paused for a while after the user zooms by hand.
@@ -298,6 +490,85 @@ final class CameraViewModel {
             director.updateZoom(displayZoom, presets: zoomPresets)
             lastAutoZoomChange = now
         }
+
+        // Hands-free: after a countdown, the AI shoots when the shot is steady, framed and well exposed.
+        if isHandsFreeOn {
+            let shotIsReady = HandsFreeGate.conditionsGood(
+                readiness: decision.readiness,
+                guidance: decision.guidance,
+                exposure: decision.exposure?.status,
+                blurRisk: decision.blurRisk,
+                thermalAllows: ThermalPolicy.allowsHandsFree(thermalState)
+            )
+            let action = handsFree.update(conditionsGood: shotIsReady, now: stamp)
+            handsFreeCountdown = handsFree.secondsRemaining(now: stamp)
+            handsFreeMessage = Self.handsFreeText(for: handsFree.state)
+            if action == .capture {
+                Task { @MainActor in
+                    #if DEBUG
+                    DeviceLog.handsFree("capture")
+                    #endif
+                    let took = await self.capture()
+                    if took {
+                        self.handsFree.didCapture(now: self.throttleClock)
+                    } else {
+                        self.handsFree.skipCapture()
+                    }
+                    self.handsFreeCountdown = nil
+                    self.afterHandsFreeShot()
+                }
+            }
+        }
+    }
+
+    // MARK: Private
+
+    /// Saves a photo, then counts it and updates the shutter thumbnail. A failed save is not counted.
+    private func record(_ data: Data) async throws {
+        try await library.save(data)
+        captureCount += 1
+        lastThumbnail = await Thumbnail.make(from: data, shortSide: 200)
+    }
+
+    private func disarmHandsFree() {
+        handsFree.disable()
+        handsFreeCountdown = nil
+        handsFreeMessage = nil
+    }
+
+    private func afterHandsFreeShot() {
+        guard handsFree.state == .finished else {
+            handsFreeMessage = Self.handsFreeText(for: handsFree.state)
+            return
+        }
+        toast = "Hands-free stopped after \(handsFree.captures) shots."
+        disarmHandsFree()
+    }
+
+    /// Heat changes the analysis pace, and it pauses the Pro automatic features when the phone is too warm.
+    private func thermalChanged() {
+        thermalState = ProcessInfo.processInfo.thermalState
+        director.setAnalysisInterval(ThermalPolicy.analysisInterval(for: thermalState))
+        if isHandsFreeOn, !ThermalPolicy.allowsHandsFree(thermalState) {
+            disarmHandsFree()
+            toast = "Hands-free paused while the phone is warm."
+        }
+        if isBestOfThreeArmed, !ThermalPolicy.allowsBestOfThree(thermalState) {
+            isBestOfThreeArmed = false
+            toast = "Best of three paused while the phone is warm."
+        }
+    }
+
+    private static func handsFreeText(for state: HandsFreeController.State) -> String? {
+        switch state {
+        case .off: nil
+        case .watching: "Hands-free on · waiting for a steady, well-framed shot"
+        case .ready: "Hands-free on · hold steady"
+        case .countdown: "Hands-free on · capturing soon"
+        case .capturing: "Hands-free on · capturing"
+        case .cooldown: "Hands-free on · paused after a shot"
+        case .finished: nil
+        }
     }
 
     /// In Auto, waits briefly for a steady preview so the shot is sharp. The wait is bounded, and it never holds
@@ -314,8 +585,6 @@ final class CameraViewModel {
         }
     }
 
-    // MARK: Private
-
     private func syncEngine() {
         camera.engine = isComparing
             ? FilterEngine(filter: .original)
@@ -328,13 +597,5 @@ final class CameraViewModel {
             try? await Task.sleep(for: .milliseconds(120))
             shutterFlash = false
         }
-    }
-
-    /// Decodes off the main actor and keeps the aspect ratio (the button crops it).
-    nonisolated private static func makeThumbnail(from data: Data) async -> UIImage? {
-        guard let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else { return nil }
-        let scale = 200 / min(image.size.width, image.size.height)
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        return await image.byPreparingThumbnail(ofSize: size)
     }
 }

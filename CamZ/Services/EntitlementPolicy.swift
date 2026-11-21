@@ -1,0 +1,86 @@
+import Foundation
+
+/// Features that need Cam Z Pro. One subscription unlocks all of them.
+enum ProFeature: CaseIterable, Sendable {
+    /// AI-triggered capture after a visible countdown. The manual shutter always stays available.
+    case handsFree
+    /// Three quick shots, keeping the sharpest one with open eyes.
+    case bestOfThree
+    /// Pro mode: exposure and focus are left to the user.
+    case manualControls
+
+    var title: String {
+        switch self {
+        case .handsFree: "Hands-free AI capture"
+        case .bestOfThree: "Best of three"
+        case .manualControls: "Pro mode controls"
+        }
+    }
+}
+
+/// What the store confirmed the last time it could be asked, kept on the device so Pro can work offline for a while.
+struct CachedEntitlement: Codable, Equatable, Sendable {
+    var productID: String
+    var verifiedAt: Date
+}
+
+/// Pure rules for who has Pro. Tested without StoreKit.
+enum EntitlementPolicy {
+    /// How long a confirmed Pro entitlement keeps working when the store cannot be asked.
+    static let offlineGrace: TimeInterval = 14 * 24 * 60 * 60
+
+    /// Whether Pro is active.
+    /// - Parameters:
+    ///   - storeAnswer: The latest store check. `true` when an active subscription was found, `false` when none was,
+    ///     and `nil` when the store did not answer in time.
+    ///   - cached: The last confirmed entitlement. Used only when the store did not answer.
+    static func isPro(storeAnswer: Bool?, cached: CachedEntitlement?, now: Date) -> Bool {
+        if let storeAnswer { return storeAnswer }
+        guard let cached else { return false }
+        let age = now.timeIntervalSince(cached.verifiedAt)
+        // A confirmation dated in the future means the clock was changed, so it is not trusted.
+        return age >= 0 && age <= offlineGrace
+    }
+
+    /// The cache after a store check. A confirmed answer replaces it, a confirmed "no" clears it, and no answer keeps it.
+    static func updatedCache(
+        storeAnswer: Bool?,
+        activeProductID: String?,
+        previous: CachedEntitlement?,
+        now: Date
+    ) -> CachedEntitlement? {
+        switch storeAnswer {
+        case true?:
+            return CachedEntitlement(productID: activeProductID ?? previous?.productID ?? "", verifiedAt: now)
+        case false?:
+            return nil
+        case nil:
+            return previous
+        }
+    }
+
+    /// Product IDs from configuration: trimmed, with empty and missing entries dropped.
+    static func productIDs(from configured: [String?]) -> [String] {
+        configured.compactMap { value in
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    /// Every Pro feature needs the same entitlement.
+    static func allows(_ feature: ProFeature, isPro: Bool) -> Bool {
+        isPro
+    }
+}
+
+/// Anything that can say whether Pro is active. View models depend on this protocol, so tests can supply a fixed answer.
+@MainActor
+protocol ProAccessing: AnyObject {
+    var isPro: Bool { get }
+}
+
+/// Used when no store is wired in. Pro is off, and free features keep working.
+@MainActor
+final class NoProAccess: ProAccessing {
+    var isPro: Bool { false }
+}

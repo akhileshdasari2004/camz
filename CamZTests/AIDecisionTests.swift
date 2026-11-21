@@ -207,10 +207,12 @@ final class AutoModeViewModelTests: XCTestCase {
     }
 
     func testProModeLeavesExposureToTheUser() async {
-        await model.start()
-        model.toggleMode()
-        model.apply(decision(delta: 0.8))
-        model.apply(decision(delta: 0.8))
+        // Pro mode is a Cam Z Pro feature, so this user has Pro.
+        let proModel = CameraViewModel(camera: camera, library: library, renderer: nil, pro: FixedProAccess(true))
+        await proModel.start()
+        proModel.toggleMode()
+        proModel.apply(decision(delta: 0.8))
+        proModel.apply(decision(delta: 0.8))
         XCTAssertTrue(camera.biasCalls.isEmpty)
     }
 

@@ -3,12 +3,18 @@ import Foundation
 /// Admits one analysis at a time, and no more often than `interval`. Frames that arrive while an analysis is busy,
 /// or too soon after the last one, are dropped. Pure, so the throttle is tested without Vision.
 struct AnalysisThrottle: Sendable {
-    let interval: TimeInterval
+    private(set) var interval: TimeInterval
     private var busy = false
     private var lastAccepted: TimeInterval = -.infinity
 
     init(interval: TimeInterval) {
         self.interval = interval
+    }
+
+    /// Changes how often analyses may start, for example when the device heats up. Takes effect on the next `tryStart`.
+    mutating func setInterval(_ seconds: TimeInterval) {
+        guard seconds.isFinite else { return }
+        interval = max(0, seconds)
     }
 
     /// Returns true when a new analysis may start at `now`, and marks it as busy.

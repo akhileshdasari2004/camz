@@ -33,13 +33,30 @@ struct TopBar: View {
 
             Spacer()
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 IconButton(
                     systemName: "sparkles",
                     isActive: model.mode == .auto,
-                    label: model.mode == .auto ? "Auto mode on" : "Auto mode off"
+                    label: model.mode == .auto ? "Auto mode on" : "Auto mode off",
+                    showsLock: !model.isPro
                 ) {
                     withAnimation(.snappy) { model.toggleMode() }
+                }
+                IconButton(
+                    systemName: "timer",
+                    isActive: model.isHandsFreeOn,
+                    label: model.isHandsFreeOn ? "Hands-free on" : "Hands-free off",
+                    showsLock: !model.isPro
+                ) {
+                    withAnimation(.snappy) { model.toggleHandsFree() }
+                }
+                IconButton(
+                    systemName: "square.stack.3d.up",
+                    isActive: model.isBestOfThreeArmed,
+                    label: model.isBestOfThreeArmed ? "Best of three on" : "Best of three off",
+                    showsLock: !model.isPro
+                ) {
+                    withAnimation(.snappy) { model.toggleBestOfThree() }
                 }
                 IconButton(systemName: "plusminus.circle", isActive: model.showExposure, label: "Exposure") {
                     withAnimation(.snappy) { model.showExposure.toggle() }
@@ -76,6 +93,8 @@ struct IconButton: View {
     let systemName: String
     var isActive = false
     let label: String
+    /// Shows a small lock when the feature needs Cam Z Pro.
+    var showsLock = false
     let action: () -> Void
 
     var body: some View {
@@ -85,9 +104,18 @@ struct IconButton: View {
                 .foregroundStyle(isActive ? Color.accentColor : .white)
                 .frame(width: 40, height: 40)
                 .background(.white.opacity(0.08), in: Circle())
+                .overlay(alignment: .bottomTrailing) {
+                    if showsLock {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(3)
+                            .background(Color.accentColor, in: Circle())
+                    }
+                }
                 .contentTransition(.symbolEffect(.replace))
         }
-        .accessibilityLabel(label)
+        .accessibilityLabel(showsLock ? "\(label), needs Cam Z Pro" : label)
         .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 }

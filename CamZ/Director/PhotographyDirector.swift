@@ -19,6 +19,10 @@ struct PhotoDecision: Equatable, Sendable {
     var guidance: Guidance = .none
     var readiness: CaptureReadiness = .moving
     var faceCount = 0
+    /// How likely the exposure is to blur at this focal length. Unknown until the camera reports its settings.
+    var blurRisk: MotionBlurRisk.Level = .unknown
+    /// The light the frame appears to be lit by. A heuristic from the colour cast, not a measurement.
+    var lightSource: LightSource = .unknown
 }
 
 /// Runs scene, exposure, lens, focus and guidance analysis on live preview frames.
@@ -47,6 +51,8 @@ final class PhotographyDirector: @unchecked Sendable {
     private var isActive = true
     private var zoom: CGFloat = 1
     private var zoomPresets: [CGFloat] = [1]
+    /// Supplies the camera's exposure settings for blur-risk judgements. Read on the director's queue.
+    private var snapshotProvider: (@Sendable () -> ExposureSnapshot?)?
 
     // Analysis state (touched only on `queue`).
     private var analysisCount = 0
@@ -68,6 +74,16 @@ final class PhotographyDirector: @unchecked Sendable {
             zoom = current
             zoomPresets = presets.isEmpty ? [current] : presets
         }
+    }
+
+    /// Changes how often analyses may start, for example when the device heats up (see `ThermalPolicy`). Safe from any thread.
+    func setAnalysisInterval(_ seconds: TimeInterval) {
+        lock.withLock { throttle.setInterval(seconds) }
+    }
+
+    /// Supplies the camera's exposure settings for blur-risk judgements. Nil removes the supplier. Safe from any thread.
+    func setExposureSnapshotProvider(_ provider: (@Sendable () -> ExposureSnapshot?)?) {
+        lock.withLock { snapshotProvider = provider }
     }
 
     /// Offers one preview frame for analysis. Cheap and non-blocking; safe to call on every frame.
@@ -126,8 +142,13 @@ final class PhotographyDirector: @unchecked Sendable {
         let frameHistogram = ExposureAnalyzer.histogram(of: image, context: context)
         let subjectHistogram = ExposureAnalyzer.histogram(of: image, in: subjectRegion, context: context)
         let frameMean = frameHistogram?.mean ?? 0.5
-        let warmth = ColorProbe.redMinusBlue(of: image, context: context)
+
+        // One colour probe gives both the warm/cool reading and the light source.
+        let colour = ColorProbe.averageColor(of: image, context: context)
+        let warmth = colour.map { $0.red - $0.blue }
         let warm = warmth.map { SceneClassifier.isWarm(redMinusBlue: $0) } ?? false
+        let lightSource = colour.map { WhiteBalanceAdvisor.classify($0, meanLuma: frameMean) } ?? .unknown
+        let lowLight = frameMean < SceneClassifier.nightMean * 1.5
 
         // Scene: labels and faces first, then brightness and colour cast as a low-confidence fallback.
         let sceneDecision = SceneClassifier.decide(
@@ -150,14 +171,15 @@ final class PhotographyDirector: @unchecked Sendable {
             subjectMean: subjectHistogram?.mean
         )
 
-        // Lens: the best zoom for the scene, stabilised so it doesn't flip.
+        // Lens: the best zoom for the scene, stabilised so it doesn't flip. Low light keeps the main lens.
         let (currentZoom, presets) = lock.withLock { (zoom, zoomPresets) }
         let wantedZoom = LensSelector.recommendedZoom(
             scene: scene,
             faceAreaFraction: faceAreaFraction,
             current: currentZoom,
             presets: presets,
-            isConfident: sceneDecision.isConfident
+            isConfident: sceneDecision.isConfident,
+            lowLight: lowLight
         )
         let recommendedZoom = zoomStable.ingest(wantedZoom)
 
@@ -165,15 +187,19 @@ final class PhotographyDirector: @unchecked Sendable {
         let focusTarget = mainFace.map { $0.eyeCenter ?? CGPoint(x: $0.box.midX, y: $0.box.midY) }
 
         // Readiness: motion, focus and exposure settling, and light level (low light needs a longer calm period).
-        let lowLight = frameMean < SceneClassifier.nightMean * 1.5
         let readinessNow = readiness.ingest(motion: motion, settling: settling, lowLight: lowLight)
+
+        // Blur: the camera's exposure time against the handheld limit for this lens. A moving scene raises the risk.
+        let supplier = lock.withLock { snapshotProvider }
+        let blurRisk = MotionBlurRisk.level(snapshot: supplier?(), subjectMoving: readinessNow == .moving)
 
         // Guidance: one message, stabilised so it doesn't flicker.
         let advice = GuidanceEngine.advice(
             readiness: readinessNow,
             horizonDegrees: horizon,
             faces: faces.map(\.box),
-            scene: scene
+            scene: scene,
+            blurRisk: blurRisk
         )
         let guidance = guidanceStable.ingest(advice) ?? Guidance.none
 
@@ -186,7 +212,9 @@ final class PhotographyDirector: @unchecked Sendable {
             focusTarget: focusTarget,
             guidance: guidance,
             readiness: readinessNow,
-            faceCount: faces.count
+            faceCount: faces.count,
+            blurRisk: blurRisk,
+            lightSource: lightSource
         )
     }
 
@@ -213,10 +241,13 @@ final class PhotographyDirector: @unchecked Sendable {
     }
 }
 
-/// A detected face: its box (normalised, origin bottom-left) and the eye midpoint when landmarks are found.
+/// A detected face: its box (normalised, origin bottom-left), the eye midpoint when landmarks are found, and how open
+/// the eyes are (see `EyeOpenness`).
 struct FaceInfo: Sendable {
     let box: CGRect
     let eyeCenter: CGPoint?
+    /// The smaller of the two eye openness ratios, or nil when the eyes are not measured.
+    let eyeOpenness: Float?
 }
 
 /// Vision wrappers that return plain values, so the analysis above stays easy to follow.
@@ -226,9 +257,16 @@ enum VisionDetector {
         let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(ciImage: image, orientation: .up, options: [:])
         guard (try? handler.perform([request])) != nil else { return [] }
+        let imageSize = image.extent.size
         return (request.results ?? [])
             .sorted { $0.boundingBox.width * $0.boundingBox.height > $1.boundingBox.width * $1.boundingBox.height }
-            .map { FaceInfo(box: $0.boundingBox, eyeCenter: eyeCenter(of: $0)) }
+            .map {
+                FaceInfo(
+                    box: $0.boundingBox,
+                    eyeCenter: eyeCenter(of: $0),
+                    eyeOpenness: eyeOpenness(of: $0, imageSize: imageSize)
+                )
+            }
     }
 
     /// Midpoint of the two eyes in normalised image coordinates, when landmarks are available.
@@ -246,6 +284,22 @@ enum VisionDetector {
         let midX = (left.x + right.x) / 2
         let midY = (left.y + right.y) / 2
         return CGPoint(x: box.minX + midX * box.width, y: box.minY + midY * box.height)
+    }
+
+    /// The smaller of the two eyes' openness ratios. The points are scaled to pixels first, so the outline keeps its true shape.
+    private static func eyeOpenness(of face: VNFaceObservation, imageSize: CGSize) -> Float? {
+        guard
+            let landmarks = face.landmarks,
+            let leftEye = landmarks.leftEye,
+            let rightEye = landmarks.rightEye
+        else { return nil }
+        let box = face.boundingBox
+        let unitsX = box.width * imageSize.width
+        let unitsY = box.height * imageSize.height
+        let ratios = [leftEye, rightEye].map {
+            EyeOpenness.ratio(of: $0.normalizedPoints, unitsX: unitsX, unitsY: unitsY)
+        }
+        return ratios.compactMap { $0 }.min()
     }
 
     private static func centre(of region: VNFaceLandmarkRegion2D) -> CGPoint? {

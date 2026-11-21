@@ -29,6 +29,9 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSCameraUsageDescription: Cam Z uses the camera to analyse the scene and take photos with AI-directed exposure and framing.
         NSPhotoLibraryAddUsageDescription: Cam Z saves the photos you take to your library.
+        # Cam Z Pro product IDs from App Store Connect. Empty means Pro is not set up in this build.
+        CamZProMonthlyProductID: ""
+        CamZProAnnualProductID: ""
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.akhilesh.camz

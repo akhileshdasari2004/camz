@@ -190,6 +190,30 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
         }
     }
 
+    /// Returns focus to the centre with continuous autofocus, once AI focus has lost its subject. Exposure is left alone.
+    func releaseTrackingFocus() {
+        sessionQueue.async { [self] in
+            guard let device = deviceInput?.device else { return }
+            try? withLockedDevice(device) { d in
+                if d.isFocusPointOfInterestSupported { d.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+                if d.isFocusModeSupported(.continuousAutoFocus) { d.focusMode = .continuousAutoFocus }
+            }
+        }
+    }
+
+    /// Exposure time, ISO and field of view of the active camera, read from the device. Safe from any thread.
+    func exposureSnapshot() -> ExposureSnapshot? {
+        guard let device = callbackLock.withLock({ _activeDevice }) else { return nil }
+        return ExposureSnapshot(
+            exposureSeconds: device.exposureDuration.seconds,
+            iso: device.iso,
+            fieldOfViewDegrees: MotionBlurRisk.fieldOfView(
+                baseDegrees: device.activeFormat.videoFieldOfView,
+                zoom: device.videoZoomFactor
+            )
+        )
+    }
+
     func setExposureBias(_ bias: Float) {
         sessionQueue.async { [self] in
             guard let device = deviceInput?.device else { return }

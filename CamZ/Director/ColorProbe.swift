@@ -1,10 +1,10 @@
 import CoreImage
 
-/// Average colour of a frame, used only to judge warm versus cool light.
+/// Average colour of a frame, used for warm versus cool light and for white-balance classification.
 enum ColorProbe {
-    /// Red minus blue of the frame's average colour: about −1 (cool) to +1 (warm). Gamma-encoded values.
+    /// The frame's average colour, gamma-encoded, 0…1 per channel. Nil when the frame is empty.
     /// Blocking: call off the main thread.
-    static func redMinusBlue(of image: CIImage, context: CIContext) -> Float? {
+    static func averageColor(of image: CIImage, context: CIContext) -> AverageColor? {
         let extent = image.extent
         guard !extent.isEmpty, extent.width.isFinite, extent.height.isFinite else { return nil }
         guard let average = CIFilter(name: "CIAreaAverage", parameters: [
@@ -24,6 +24,12 @@ enum ColorProbe {
                 colorSpace: nil
             )
         }
-        return pixel[0] - pixel[2]
+        return AverageColor(red: pixel[0], green: pixel[1], blue: pixel[2])
+    }
+
+    /// Red minus blue of the frame's average colour: about −1 (cool) to +1 (warm). Gamma-encoded values.
+    /// Blocking: call off the main thread.
+    static func redMinusBlue(of image: CIImage, context: CIContext) -> Float? {
+        averageColor(of: image, context: context).map { $0.red - $0.blue }
     }
 }

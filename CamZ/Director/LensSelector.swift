@@ -10,17 +10,23 @@ enum LensSelector {
 
     /// Returns the zoom to use: a preset from `presets`, or `current` when no change helps.
     /// Changes happen only for confident scene decisions, so a guess never moves the lens.
+    /// In low light the lens never moves up, and telephoto steps back to the main lens: its smaller aperture is noisier.
     static func recommendedZoom(
         scene: SceneKind,
         faceAreaFraction: Float,
         current: CGFloat,
         presets: [CGFloat],
-        isConfident: Bool = true
+        isConfident: Bool = true,
+        lowLight: Bool = false
     ) -> CGFloat {
         guard isConfident else { return current }
 
         func offered(_ zoom: CGFloat) -> Bool {
             presets.contains { abs($0 - zoom) < 0.01 }
+        }
+
+        if lowLight {
+            return (current > 1.5 && offered(1)) ? 1 : current
         }
 
         switch scene {
