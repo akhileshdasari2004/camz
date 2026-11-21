@@ -47,6 +47,8 @@ final class CameraViewModel {
     private(set) var lastCaptureSaved = false
     /// Photos the library refused. They wait here for retry, and the review screen shows them.
     private(set) var unsavedPhotos: [CapturedPhoto] = []
+    /// True when Photos refused the last save because Cam Z may not add photos. The review then offers Settings.
+    private(set) var photosAccessDenied = false
     /// What the capture is doing right now, such as "Merging exposures". Nil when idle.
     private(set) var captureProgress: String?
     private(set) var focusPoint: CGPoint?
@@ -504,6 +506,7 @@ final class CameraViewModel {
                 savedIndex = index
                 break
             } catch {
+                noteSaveError(error)
                 refused.append(shots[index])
             }
         }
@@ -536,6 +539,7 @@ final class CameraViewModel {
             do {
                 try await record(photo)
             } catch {
+                noteSaveError(error)
                 remaining.append(photo)
             }
         }
@@ -775,8 +779,11 @@ final class CameraViewModel {
             if let note { toast = note }
             return true
         } catch {
+            noteSaveError(error)
             keepUnsaved(photo)
-            toast = "Couldn't save the photo: \(error.localizedDescription) It is kept for retry in the review."
+            toast = photosAccessDenied
+                ? "Photos access is off. Allow it in Settings. The photo is kept for retry in the review."
+                : "Couldn't save the photo: \(error.localizedDescription) It is kept for retry in the review."
             return false
         }
     }
@@ -784,6 +791,11 @@ final class CameraViewModel {
     private func setLastCapture(_ photo: CapturedPhoto) {
         lastCapture = photo
         lastCaptureSaved = false
+    }
+
+    /// Remembers whether a refused save was a permission refusal, so the review can point at Settings.
+    private func noteSaveError(_ error: Error) {
+        photosAccessDenied = (error as? PhotoLibraryError) == .notAuthorized
     }
 
     private func keepUnsaved(_ photo: CapturedPhoto) {
@@ -846,6 +858,7 @@ final class CameraViewModel {
     /// Writes a photo to the library, then counts it and updates the shutter thumbnail. A failed save is not counted.
     private func record(_ photo: CapturedPhoto) async throws {
         try await library.save(photo)
+        photosAccessDenied = false
         captureCount += 1
         if lastCapture?.id == photo.id { lastCaptureSaved = true }
         if let primary = photo.primaryData {

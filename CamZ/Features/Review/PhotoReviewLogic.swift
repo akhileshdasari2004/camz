@@ -51,8 +51,11 @@ enum PhotoReviewLogic {
     }
 
     /// The save status shown on the review screen.
-    static func saveStatusText(saved: Bool, unsavedCount: Int) -> String {
+    static func saveStatusText(saved: Bool, unsavedCount: Int, accessDenied: Bool = false) -> String {
         if unsavedCount > 0 {
+            if accessDenied {
+                return "Photos access is off. Allow Cam Z to add photos in Settings, then retry."
+            }
             return unsavedCount == 1
                 ? "1 photo is not saved yet. Retry to save it to Photos."
                 : "\(unsavedCount) photos are not saved yet. Retry to save them to Photos."

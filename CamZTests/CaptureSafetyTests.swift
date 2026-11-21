@@ -57,6 +57,27 @@ final class CaptureSafetyTests: XCTestCase {
         XCTAssertTrue(model.toast?.contains("Memory is low") == true, "the user is told why, got \(model.toast ?? "nil")")
     }
 
+    func testDeniedPhotosAccessSaysWhereToFixIt() async {
+        library.error = PhotoLibraryError.notAuthorized
+        let model = makeModel()
+        await model.start()
+        await model.capture()
+        XCTAssertTrue(model.photosAccessDenied, "the review can offer Settings")
+        XCTAssertTrue(model.toast?.contains("Settings") == true, "got \(model.toast ?? "nil")")
+        XCTAssertEqual(model.unsavedPhotos.count, 1, "the photo is kept for retry, never dropped")
+    }
+
+    func testSavingAgainAfterAccessIsAllowedClearsTheDeniedState() async {
+        library.error = PhotoLibraryError.notAuthorized
+        let model = makeModel()
+        await model.start()
+        await model.capture()
+        library.error = nil
+        await model.retryUnsavedPhotos()
+        XCTAssertFalse(model.photosAccessDenied)
+        XCTAssertTrue(model.unsavedPhotos.isEmpty, "the retried photo is saved")
+    }
+
     func testStopAIWithNoMergeRunningChangesNothing() async {
         let model = makeModel()
         await model.start()

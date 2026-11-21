@@ -67,7 +67,11 @@ struct PhotoReviewView: View {
     }
 
     private var saveStatus: String {
-        PhotoReviewLogic.saveStatusText(saved: model.lastCaptureSaved, unsavedCount: model.unsavedPhotos.count)
+        PhotoReviewLogic.saveStatusText(
+            saved: model.lastCaptureSaved,
+            unsavedCount: model.unsavedPhotos.count,
+            accessDenied: model.photosAccessDenied
+        )
     }
 
     @ViewBuilder
@@ -102,6 +106,16 @@ struct PhotoReviewView: View {
 
     private var actions: some View {
         VStack(spacing: 10) {
+            if model.photosAccessDenied {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                } label: {
+                    Label("Open Settings", systemImage: "gear")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityHint("Opens Cam Z's settings so you can allow adding photos")
+            }
             if !model.unsavedPhotos.isEmpty {
                 Button {
                     Task { await model.retryUnsavedPhotos() }
