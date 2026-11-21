@@ -25,13 +25,6 @@ final class ProductIntelligencePureTests: XCTestCase {
         XCTAssertEqual(MotionBlurRisk.level(snapshot: nil, subjectMoving: false), .unknown)
     }
 
-    func testWhiteBalanceStaysAutomaticWhileLockingIsOff() {
-        XCTAssertFalse(WhiteBalanceAdvisor.lockingEnabled)
-        XCTAssertEqual(
-            WhiteBalanceAdvisor.mode(source: .tungsten, atmosphericScene: true, stableFrames: 100),
-            .continuousAuto
-        )
-    }
 
     func testLightSourceComesFromTheColourCast() {
         XCTAssertEqual(WhiteBalanceAdvisor.classify(AverageColor(red: 0.8, green: 0.5, blue: 0.25), meanLuma: 0.5), .tungsten)

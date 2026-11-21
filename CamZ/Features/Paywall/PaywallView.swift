@@ -4,6 +4,9 @@ import SwiftUI
 struct PaywallView: View {
     @Environment(\.dismiss) private var dismiss
     let store: StoreService
+    /// Legal pages, shown only once they are configured. Nil hides the link rather than showing a dead one.
+    var privacyURL: URL?
+    var termsURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -19,6 +22,7 @@ struct PaywallView: View {
                     }
                     restore
                     fineprint
+                    legalLinks
                 }
                 .padding(24)
             }
@@ -110,6 +114,21 @@ struct PaywallView: View {
         }
         .disabled(store.isWorking)
         .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var legalLinks: some View {
+        if privacyURL != nil || termsURL != nil {
+            HStack(spacing: 16) {
+                if let privacyURL {
+                    Link("Privacy Policy", destination: privacyURL)
+                }
+                if let termsURL {
+                    Link("Terms of Use", destination: termsURL)
+                }
+            }
+            .font(.footnote)
+        }
     }
 
     private var fineprint: some View {

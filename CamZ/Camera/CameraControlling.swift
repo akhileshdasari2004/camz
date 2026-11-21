@@ -30,6 +30,54 @@ enum CameraInterruption: Equatable, Sendable {
     }
 }
 
+/// What the user asked one shutter press to save.
+struct CaptureRequest: Equatable, Sendable {
+    var format: CaptureFormat
+    /// Keep a processed photo as well as the RAW file, saved as a Photos pair.
+    var alongsideProcessed: Bool
+
+    static let processed = CaptureRequest(format: .processed, alongsideProcessed: false)
+}
+
+/// The RAW formats this camera offers right now.
+struct RawCapabilities: Equatable, Sendable {
+    var candidates: [RawFormatCandidate]
+    /// True when ProRAW is enabled on the photo output for this device.
+    var proRAWAllowed: Bool
+
+    static let none = RawCapabilities(candidates: [], proRAWAllowed: false)
+}
+
+/// What one shutter press produced. A plain capture fills `processed`. A RAW capture fills `raw`, and `processed` too when
+/// requested. A computed photo (HDR merge or night average) fills `processed` and keeps the camera's own frame in `original`.
+struct CapturedPhoto: Sendable {
+    var processed: Data?
+    var raw: Data?
+    /// The unprocessed, camera-native frame kept beside a computed photo, so the original can be compared or restored.
+    var original: Data?
+    /// True when `raw` is Apple ProRAW rather than Bayer RAW.
+    var rawIsProRAW = false
+    /// Why the request could not be met exactly. Nil when it was.
+    var fallbackReason: String?
+
+    init(
+        processed: Data? = nil,
+        raw: Data? = nil,
+        original: Data? = nil,
+        rawIsProRAW: Bool = false,
+        fallbackReason: String? = nil
+    ) {
+        self.processed = processed
+        self.raw = raw
+        self.original = original
+        self.rawIsProRAW = rawIsProRAW
+        self.fallbackReason = fallbackReason
+    }
+
+    /// The photo used for scoring and the thumbnail: the processed photo when there is one, otherwise the RAW file.
+    var primaryData: Data? { processed ?? raw }
+}
+
 /// Everything the UI needs from the camera. `CameraService` is the real
 /// implementation; tests use a mock so the view model runs without hardware.
 protocol CameraControlling: AnyObject, Sendable {
@@ -58,10 +106,31 @@ protocol CameraControlling: AnyObject, Sendable {
     /// Exposure settings of the active camera, for blur-risk judgements. Nil when unavailable. Safe from any thread.
     func exposureSnapshot() -> ExposureSnapshot?
 
+    /// One processed photo, with the look applied. Used by the standard one-tap capture and by best of three.
     func capturePhoto(
         flash: AVCaptureDevice.FlashMode,
         willCapture: @escaping @Sendable () -> Void
     ) async throws -> Data
+
+    /// One shutter press in the requested format. RAW formats are used only where the camera offers them.
+    func capture(
+        _ request: CaptureRequest,
+        flash: AVCaptureDevice.FlashMode,
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> CapturedPhoto
+
+    /// Bracketed exposures at these EV offsets, in capture order. Processed frames only.
+    func captureBracket(
+        evOffsets: [Float],
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> [Data]
+
+    /// The RAW formats this camera offers right now.
+    func rawCapabilities() -> RawCapabilities
+    /// Whether bracketed capture is available and how many frames one bracket may hold.
+    func bracketCapability() -> BracketCapability
+    /// Holds white balance at this colour temperature, or returns to continuous auto when nil.
+    func setWhiteBalanceLock(kelvin: Double?)
 }
 
 /// Default behaviour for the newer camera controls, so existing implementations and test doubles keep working.
@@ -71,9 +140,39 @@ extension CameraControlling {
     func releaseTrackingFocus() {}
     func rampZoom(to factor: CGFloat) { setZoom(factor) }
     func exposureSnapshot() -> ExposureSnapshot? { nil }
+
+    func capture(
+        _ request: CaptureRequest,
+        flash: AVCaptureDevice.FlashMode,
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> CapturedPhoto {
+        let data = try await capturePhoto(flash: flash, willCapture: willCapture)
+        return CapturedPhoto(processed: data)
+    }
+
+    func captureBracket(
+        evOffsets: [Float],
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> [Data] {
+        throw CameraError.captureFailed
+    }
+
+    func rawCapabilities() -> RawCapabilities { .none }
+    func bracketCapability() -> BracketCapability { .none }
+    func setWhiteBalanceLock(kelvin: Double?) {}
 }
 
 /// Where finished photos go.
 protocol PhotoSaving: Sendable {
     func save(_ data: Data) async throws
+    /// Saves a capture as one Photos asset. Companion files (a RAW file with its processed photo, or the original beside
+    /// a computed photo) are paired with the primary photo.
+    func save(_ photo: CapturedPhoto) async throws
+}
+
+extension PhotoSaving {
+    func save(_ photo: CapturedPhoto) async throws {
+        guard let primary = photo.primaryData else { throw CameraError.captureFailed }
+        try await save(primary)
+    }
 }

@@ -71,6 +71,18 @@ Until these steps are done, rows 25 to 28 cannot be run. Leave them blank.
 | 32 | Best of three | Pro user, flash off, steady subject. Press the shutter. | "Shot 1 of 3" to "Shot 3 of 3", then "Choosing the sharpest". One photo is added to Photos, and the toast says the others were discarded. Compare the saved photo with the two you did not keep, if you can see them. | | |
 | 33 | Best of three with flash on | Turn the flash on, then press the shutter. | "Turn the flash off to use best of three." No photos are taken. | | |
 | 34 | Best of three, eyes closed | Ask the subject to blink during the burst. | If every shot has closed eyes, the toast says no shot had open eyes. Record what happened. | | |
+| 35 | RAW file | Set Save as to RAW on a phone with a rear camera. Take one photo. Check Photos. | A RAW file is saved beside a processed photo as one Photos item. If RAW is not offered, the options sheet says so and a processed photo is saved. | | |
+| 36 | ProRAW | Set Save as to ProRAW. On a phone without ProRAW, check the note on the options sheet. | ProRAW is saved where the device supports it. Elsewhere the note says Bayer RAW is used, and a Bayer RAW file is saved. | | |
+| 37 | HDR merge | Turn on HDR for high-contrast scenes. Point at a bright window with a dark corner in frame. | Three exposures are taken, with one flash. The merged photo keeps the window detail and lifts the corner. The normal exposure is kept beside it in Photos. Look for ghosting on anyone who moves. | | |
+| 38 | Night burst | Turn on night burst. Hold the phone steady in a dim room. Then repeat with a moving subject. | Four frames are averaged and the result is less grainy than one frame. With a moving subject, the toast says why one photo was taken. | | |
+| 39 | White-balance lock | Warm light at sunset with no people in frame, and the phone still for about ten seconds. Then point at a face. | The log shows a lock near half the warmth, so the sunset stays warm. With a face in frame, auto white balance returns. | | |
+| 40 | Image quality of computed photos | Compare a merged or night photo with the normal exposure kept beside it. | No halos along edges. Shadows and highlights are no worse than the normal exposure. Do not conclude that Cam Z beats Apple's Camera until row 18 is done. | | |
+| 41 | Local StoreKit configuration | In the scheme's run options, select `StoreKit/CamZ.storekit`. Open the paywall. | The two Pro products appear with the local test prices. A sandbox purchase unlocks Pro. | | |
+| 42 | Legal links | Set the privacy and terms URLs in Info.plist, then open the paywall. Clear them and open it again. | With URLs, both links open in the browser. Without them, no links are shown. | | |
+| 43 | Small-screen top bar | Run on the smallest iPhone you have, such as an SE or mini. Check the top bar with and without the zoom readout. | Every control is visible and tappable, and the zoom readout is readable. Record the phone model. | | |
+| 44 | Hands-free session limit | Pro user. Turn hands-free on, point at a steady framed subject, then leave it running with no subject for ten minutes. | After ten minutes hands-free stops with a toast. At most five automatic photos per turn-on. | | |
+| 45 | Best of three, save failure | Pro user. Make the sharpest shot fail to save if you can, such as by denying Photos access partway through. | The toast says the next best was saved, or that none could be saved. Nothing is dropped without a message. | | |
+| 46 | Standard capture without purchase | Free user, default capture options. Tap the shutter. | A photo is saved and no paywall opens. | | |
 
 ## Stop and report if
 

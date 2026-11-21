@@ -30,8 +30,11 @@ targets:
         NSCameraUsageDescription: Cam Z uses the camera to analyse the scene and take photos with AI-directed exposure and framing.
         NSPhotoLibraryAddUsageDescription: Cam Z saves the photos you take to your library.
         # Cam Z Pro product IDs from App Store Connect. Empty means Pro is not set up in this build.
-        CamZProMonthlyProductID: ""
-        CamZProAnnualProductID: ""
+        CamZProMonthlyProductID: com.akhilesh.camz.pro.monthly
+        CamZProAnnualProductID: com.akhilesh.camz.pro.annual
+        # Legal pages: leave empty until they exist. An empty value hides the link in the paywall.
+        CamZPrivacyPolicyURL: ""
+        CamZTermsURL: ""
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.akhilesh.camz

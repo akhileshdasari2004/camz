@@ -34,6 +34,11 @@ enum DeviceLog {
         logger.info("\(line, privacy: .public)")
     }
 
+    /// The capture plan for one shutter press, with the reason it was chosen or refused.
+    static func plan(_ reason: String) {
+        logger.info("plan \(reason, privacy: .public)")
+    }
+
     /// A hands-free event, such as "countdown" or "capture".
     static func handsFree(_ event: String) {
         logger.info("handsfree \(event, privacy: .public)")

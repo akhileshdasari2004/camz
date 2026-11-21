@@ -1,0 +1,90 @@
+{
+  "identifier" : "CAMZ0001",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_applicationInternalID" : "6000000000",
+    "_developerTeamID" : "",
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefrontCountryCode" : "USA",
+    "_storeKitErrors" : [
+
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "CAMZPRO001",
+      "localizations" : [
+
+      ],
+      "name" : "Cam Z Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "4.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "6000000001",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Hands-free capture, best of three and Pro mode.",
+              "displayName" : "Cam Z Pro Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.akhilesh.camz.pro.monthly",
+          "promotionalOffers" : [
+
+          ],
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Cam Z Pro Monthly",
+          "subscriptionGroupID" : "CAMZPRO001",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "39.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "6000000002",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Hands-free capture, best of three and Pro mode, billed once a year.",
+              "displayName" : "Cam Z Pro Annual",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.akhilesh.camz.pro.annual",
+          "promotionalOffers" : [
+
+          ],
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Cam Z Pro Annual",
+          "subscriptionGroupID" : "CAMZPRO001",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

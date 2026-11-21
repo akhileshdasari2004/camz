@@ -34,11 +34,25 @@ struct CameraScreen: View {
             }
         }
         .sheet(isPresented: paywallBinding) {
-            PaywallView(store: model.store)
+            PaywallView(
+                store: model.store,
+                privacyURL: AppConfiguration.current.privacyPolicyURL,
+                termsURL: AppConfiguration.current.termsURL
+            )
+        }
+        .sheet(isPresented: optionsBinding) {
+            CaptureOptionsView(model: model)
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: model.captureCount)
         .sensoryFeedback(.selection, trigger: model.filter)
         .sensoryFeedback(.selection, trigger: model.mode)
+    }
+
+    private var optionsBinding: Binding<Bool> {
+        Binding(
+            get: { model.isOptionsPresented },
+            set: { model.isOptionsPresented = $0 }
+        )
     }
 
     private var paywallBinding: Binding<Bool> {

@@ -60,4 +60,21 @@ enum BestShotRanker {
             return lhs > rhs
         }
     }
+
+    /// Every shot's index, best first, by the same rule as `bestIndex`. Used to fall back to the next-best shot when a save fails.
+    static func ranking(of shots: [ShotMeasurement]) -> [Int] {
+        func sharpness(_ index: Int) -> Float {
+            let value = shots[index].sharpness
+            return value.isFinite ? value : 0
+        }
+        return shots.indices.sorted { lhs, rhs in
+            let lhsEyesFine = shots[lhs].eyesOpen != false
+            let rhsEyesFine = shots[rhs].eyesOpen != false
+            if lhsEyesFine != rhsEyesFine { return lhsEyesFine }
+            let a = sharpness(lhs)
+            let b = sharpness(rhs)
+            if a != b { return a > b }
+            return lhs < rhs
+        }
+    }
 }

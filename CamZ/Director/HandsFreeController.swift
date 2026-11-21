@@ -29,9 +29,13 @@ struct HandsFreeController: Sendable {
     var cooldownDuration: TimeInterval = 5.0
     /// Most automatic captures allowed per enabling. Prevents runaway shooting.
     var maxCaptures: Int = 5
+    /// Longest time one enabling may last, so hands-free cannot run unattended for long. Ten minutes by default.
+    var maxSessionDuration: TimeInterval = 600
 
     private(set) var state: State = .off
     private(set) var captures = 0
+    /// When this enabling ends by itself.
+    private(set) var sessionEnds: TimeInterval = .infinity
 
     var isEnabled: Bool {
         switch state {
@@ -40,8 +44,9 @@ struct HandsFreeController: Sendable {
         }
     }
 
-    mutating func enable() {
+    mutating func enable(now: TimeInterval = 0) {
         captures = 0
+        sessionEnds = now + maxSessionDuration
         state = .watching
     }
 
@@ -52,6 +57,10 @@ struct HandsFreeController: Sendable {
 
     /// Feeds one analysis. Returns `.capture` once, when a countdown finishes with conditions still good.
     mutating func update(conditionsGood: Bool, now: TimeInterval) -> Action {
+        if isEnabled, now >= sessionEnds {
+            state = .finished
+            return .none
+        }
         switch state {
         case .off, .finished, .capturing:
             return .none

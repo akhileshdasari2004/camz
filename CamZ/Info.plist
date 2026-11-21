@@ -21,8 +21,12 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CamZProMonthlyProductID</key>
-	<string></string>
+	<string>com.akhilesh.camz.pro.monthly</string>
 	<key>CamZProAnnualProductID</key>
+	<string>com.akhilesh.camz.pro.annual</string>
+	<key>CamZPrivacyPolicyURL</key>
+	<string></string>
+	<key>CamZTermsURL</key>
 	<string></string>
 	<key>NSCameraUsageDescription</key>
 	<string>Cam Z uses the camera to analyse the scene and take photos with AI-directed exposure and framing.</string>

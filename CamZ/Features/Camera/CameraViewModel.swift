@@ -1,6 +1,10 @@
 import AVFoundation
+import CoreImage
 import Foundation
 import Observation
+
+/// Context for merges and encodes. Colour values stay gamma-encoded, the same as the weight calculations.
+private let computedPhotoContext = CIContext(options: [.cacheIntermediates: false, .workingColorSpace: NSNull()])
 
 @MainActor
 @Observable
@@ -55,6 +59,16 @@ final class CameraViewModel {
     /// Thermal state from the public API. Heat slows analysis and pauses the Pro automatic features.
     private(set) var thermalState: ProcessInfo.ThermalState
 
+    /// Capture options, set on the options sheet. Standard one-tap capture is the default for each.
+    var captureFormat: CaptureFormat = .processed
+    /// With RAW, also keep the processed photo as a Photos pair.
+    var alsoSavesProcessed = true
+    /// Bracket and merge exposures when the scene has strong contrast.
+    var isHDREnabled = false
+    /// Average several frames in low light.
+    var isNightModeEnabled = false
+    var isOptionsPresented = false
+
     var filter: FilterKind = .original {
         didSet {
             if filter != oldValue {
@@ -84,6 +98,8 @@ final class CameraViewModel {
     private let library: PhotoSaving
     /// Who has Pro: the store in the app, a fixed answer in tests.
     private let pro: ProAccessing
+    /// Which features need Pro. Read from configuration, so product decisions do not touch camera code.
+    private let gatedFeatures: Set<ProFeature>
     private let clock: @Sendable () -> TimeInterval
     private var zoomAtGestureStart: CGFloat = 1
     private var focusResetTask: Task<Void, Never>?
@@ -91,8 +107,12 @@ final class CameraViewModel {
     private var exposureGovernor = ExposureGovernor()
     /// Decides when autofocus follows the subject, and lets go once the subject has been gone for a while.
     private var focusPlanner = FocusPlanner()
-    /// Hands-free AI capture: countdown, pause between shots and a cap.
+    /// Hands-free AI capture: countdown, pause between shots, a cap on shots and a time limit.
     private var handsFree = HandsFreeController()
+    /// Decides when a white-balance lock is justified. Locks only after a stable run of warm, atmospheric light.
+    private var whiteBalance = WhiteBalanceController()
+    /// The white-balance lock last sent to the camera (nil means continuous auto).
+    private var appliedKelvin: Double?
     private var lastAutoZoomChange = Date.distantPast
     /// When the director last reported. Old or missing decisions mean the AI has stalled.
     private var lastDecisionAt: Date?
@@ -109,6 +129,7 @@ final class CameraViewModel {
         renderer: PreviewRenderer? = PreviewRenderer(),
         store: StoreService? = nil,
         pro: ProAccessing? = nil,
+        configuration: AppConfiguration = AppConfiguration.current,
         clock: @escaping @Sendable () -> TimeInterval = { Date.timeIntervalSinceReferenceDate }
     ) {
         // Built here rather than in a default argument: the store is main-actor isolated.
@@ -118,6 +139,7 @@ final class CameraViewModel {
         self.renderer = renderer
         self.store = resolvedStore
         self.pro = pro ?? resolvedStore
+        self.gatedFeatures = configuration.gatedFeatures
         self.clock = clock
         self.thermalState = ProcessInfo.processInfo.thermalState
 
@@ -145,6 +167,11 @@ final class CameraViewModel {
 
     /// Whether the user has Cam Z Pro. Reads the store, so the screens update when access changes.
     var isPro: Bool { pro.isPro }
+
+    /// Whether a feature may run for this user, under the configured gating.
+    func isAllowed(_ feature: ProFeature) -> Bool {
+        EntitlementPolicy.allows(feature, isPro: isPro, gated: gatedFeatures)
+    }
 
     // MARK: Lifecycle
 
@@ -243,7 +270,7 @@ final class CameraViewModel {
     /// Switches between Auto and Pro. Pro (manual controls) needs Cam Z Pro; without it, the paywall opens instead.
     func toggleMode() {
         if mode == .auto {
-            guard EntitlementPolicy.allows(.manualControls, isPro: isPro) else {
+            guard isAllowed(.manualControls) else {
                 isPaywallPresented = true
                 return
             }
@@ -262,7 +289,7 @@ final class CameraViewModel {
             disarmHandsFree()
             return
         }
-        guard EntitlementPolicy.allows(.handsFree, isPro: isPro) else {
+        guard isAllowed(.handsFree) else {
             isPaywallPresented = true
             return
         }
@@ -279,7 +306,7 @@ final class CameraViewModel {
             return
         }
         isBestOfThreeArmed = false
-        handsFree.enable()
+        handsFree.enable(now: throttleClock)
         handsFreeMessage = Self.handsFreeText(for: handsFree.state)
     }
 
@@ -289,7 +316,7 @@ final class CameraViewModel {
             isBestOfThreeArmed = false
             return
         }
-        guard EntitlementPolicy.allows(.bestOfThree, isPro: isPro) else {
+        guard isAllowed(.bestOfThree) else {
             isPaywallPresented = true
             return
         }
@@ -322,8 +349,9 @@ final class CameraViewModel {
 
     // MARK: Capture
 
-    /// The shutter. Routes to best of three when it is armed; otherwise takes one photo, waiting briefly for a steady frame in Auto.
-    /// Returns true when a photo was taken and saved, and false when the shutter was refused or the capture failed.
+    /// The shutter. Routes to best of three when it is armed. Otherwise it plans the capture (one photo, an HDR bracket,
+    /// or a night burst) and falls back to one photo, with the reason, wherever a plan cannot run.
+    /// Returns true when a photo was taken and saved; false when the shutter was refused or the capture failed.
     @discardableResult
     func capture() async -> Bool {
         if isBestOfThreeArmed {
@@ -343,28 +371,32 @@ final class CameraViewModel {
         let waited = Date.now.timeIntervalSince(waitStarted)
         #endif
 
-        do {
-            let data = try await camera.capturePhoto(flash: flashMode) { [weak self] in
-                Task { @MainActor in self?.flashShutter() }
-            }
-            try await record(data)
-            #if DEBUG
-            DeviceLog.capture(waited: waited, outcome: "saved")
-            #endif
-            return true
-        } catch {
-            toast = error.localizedDescription
-            #if DEBUG
-            DeviceLog.capture(waited: waited, outcome: "failed")
-            #endif
-            return false
+        let plan = planCapture()
+        #if DEBUG
+        DeviceLog.plan(plan.reason)
+        #endif
+
+        let saved: Bool
+        switch plan.strategy {
+        case .single:
+            let optionsAsked = isHDREnabled || isNightModeEnabled
+            saved = await captureSingle(note: optionsAsked ? plan.reason : nil)
+        case .hdrBracket(let offsets):
+            saved = await captureComputed(evOffsets: offsets, kind: .hdr)
+        case .nightBurst(let frames):
+            saved = await captureComputed(evOffsets: Array(repeating: 0, count: frames), kind: .night)
         }
+        #if DEBUG
+        DeviceLog.capture(waited: waited, outcome: saved ? "saved" : "failed")
+        #endif
+        return saved
     }
 
-    /// Takes three shots in a row, measures each for sharpness and open eyes, and keeps only the best. The other two are
-    /// discarded. If the shots cannot be scored, the last shot is kept and the toast says so.
+    /// Takes three shots in a row, measures each for sharpness and open eyes, and saves the best. The shots are scored
+    /// first, and the others are dropped only after the chosen photo is confirmed saved. If the best cannot be saved, the
+    /// next best is tried. If none can be saved, the toast says so, rather than dropping them silently.
     func captureBestOfThree() async {
-        guard EntitlementPolicy.allows(.bestOfThree, isPro: isPro) else {
+        guard isAllowed(.bestOfThree) else {
             isPaywallPresented = true
             return
         }
@@ -410,32 +442,39 @@ final class CameraViewModel {
         }.value
         isChoosingBestShot = false
 
-        let scored = measured.enumerated().compactMap { offset, value in value.map { (offset, $0) } }
-        let chosen: Int
-        if let best = BestShotRanker.bestIndex(of: scored.map(\.1)) {
-            chosen = scored[best].0
-        } else {
-            chosen = shots.count - 1
+        let scored: [(index: Int, shot: ShotMeasurement)] = measured.enumerated().compactMap { offset, value in
+            value.map { (index: offset, shot: $0) }
         }
-        let chosenScore = measured[chosen]
+        let ranked = BestShotRanker.ranking(of: scored.map(\.shot)).map { scored[$0].index }
+        let unscored: [Int] = measured.indices.filter { measured[$0] == nil }.reversed()
+        let order = ranked + unscored
 
         #if DEBUG
-        DeviceLog.bestOfThree(sharpness: measured.map { $0?.sharpness }, chosen: chosen, eyesOpen: chosenScore?.eyesOpen)
+        DeviceLog.bestOfThree(sharpness: measured.map { $0?.sharpness }, chosen: order.first ?? 0, eyesOpen: measured[order.first ?? 0]?.eyesOpen)
         #endif
 
         let count = "\(shots.count) shot\(shots.count == 1 ? "" : "s")"
-        do {
-            try await record(shots[chosen])
-            if scored.isEmpty {
-                toast = "Saved one of \(count). Scoring was unavailable."
-            } else if chosenScore?.eyesOpen == false {
-                toast = "Saved the sharpest of \(count). No shot had open eyes."
-            } else {
-                toast = "Saved the sharpest of \(count). The others were discarded."
+        var lastError: Error?
+        for index in order {
+            do {
+                try await record(CapturedPhoto(processed: shots[index]))
+                if index == order.first {
+                    if scored.isEmpty {
+                        toast = "Saved one of \(count). Scoring was unavailable."
+                    } else if measured[index]?.eyesOpen == false {
+                        toast = "Saved the sharpest of \(count). No shot had open eyes."
+                    } else {
+                        toast = "Saved the sharpest of \(count). The others were discarded."
+                    }
+                } else {
+                    toast = "The sharpest shot could not be saved, so the next best was saved. The others were discarded."
+                }
+                return
+            } catch {
+                lastError = error
             }
-        } catch {
-            toast = error.localizedDescription
         }
+        toast = "None of the \(count) could be saved. \(lastError?.localizedDescription ?? "")"
     }
 
     // MARK: AI direction
@@ -460,6 +499,19 @@ final class CameraViewModel {
             if target != exposureBias {
                 applyBias(target)
             }
+        }
+
+        // White balance: lock only for stable, warm, atmospheric light with no people in frame. Otherwise continuous auto.
+        let whiteBalanceDecision = whiteBalance.ingest(
+            kelvin: decision.colorTemperature,
+            atmosphericScene: decision.atmosphericLight,
+            faceCount: decision.faceCount
+        )
+        var wantedKelvin: Double?
+        if case .lock(let kelvin, _) = whiteBalanceDecision { wantedKelvin = kelvin }
+        if Self.shouldApplyWhiteBalance(from: appliedKelvin, to: wantedKelvin) {
+            appliedKelvin = wantedKelvin
+            camera.setWhiteBalanceLock(kelvin: wantedKelvin)
         }
 
         // Focus: follow the subject's eyes or face, let go after it has been gone for two seconds, and never fight a tap.
@@ -523,11 +575,165 @@ final class CameraViewModel {
 
     // MARK: Private
 
+    private enum ComputedKind {
+        case hdr
+        case night
+    }
+
+    /// One ordinary photo in the chosen format. Falls back to a processed photo, and says why, when RAW is unavailable.
+    private func captureSingle(note: String? = nil) async -> Bool {
+        let request = resolvedRequest()
+        do {
+            let photo = try await camera.capture(request, flash: flashMode) { [weak self] in
+                Task { @MainActor in self?.flashShutter() }
+            }
+            try await record(photo)
+            // Say why, when the request could not be met or when HDR or night was asked for and refused.
+            if let reason = photo.fallbackReason ?? note {
+                toast = reason
+            }
+            return true
+        } catch {
+            toast = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Brackets the exposures and merges them. Any failure falls back to the normal-exposure frame or to one photo, and says so.
+    private func captureComputed(evOffsets: [Float], kind: ComputedKind) async -> Bool {
+        let frames: [Data]
+        do {
+            frames = try await camera.captureBracket(evOffsets: evOffsets) { [weak self] in
+                Task { @MainActor in self?.flashShutter() }
+            }
+        } catch {
+            toast = "Bracketed capture is not available right now, so one photo was taken."
+            return await captureSingle()
+        }
+        // A merge needs at least two frames. With fewer, one photo is the honest result.
+        guard frames.count >= 2 else {
+            return await captureSingle(note: "Bracketed capture returned too few frames, so one photo was taken.")
+        }
+
+        // Put the frames in exposure order when every frame records its bias. The normal exposure is the one closest to zero.
+        let biases = frames.map { ExposureBias.read(from: $0) }
+        var order = Array(frames.indices)
+        if biases.allSatisfy({ $0 != nil }) {
+            order.sort { (biases[$0] ?? 0) < (biases[$1] ?? 0) }
+        }
+        let ordered = order.map { frames[$0] }
+        let orderedBiases = order.map { biases[$0] }
+        let reference = orderedBiases.enumerated()
+            .min { abs($0.element ?? 0) < abs($1.element ?? 0) }?.offset ?? (ordered.count / 2)
+
+        let snapshot = camera.exposureSnapshot()
+        let iso = snapshot.map { Float($0.iso) } ?? 0
+        let exposure = decision.exposure
+        let highlight = exposure?.highlightClipping ?? 0
+        let shadow = exposure?.shadowClipping ?? 0
+        let look = camera.engine
+
+        let merged: Data? = await Task.detached(priority: .userInitiated) {
+            switch kind {
+            case .hdr:
+                return ComputedPhoto.hdr(
+                    frames: ordered,
+                    reference: reference,
+                    look: look,
+                    iso: iso,
+                    highlightClipping: highlight,
+                    shadowClipping: shadow,
+                    context: computedPhotoContext
+                )
+            case .night:
+                return ComputedPhoto.night(
+                    frames: ordered,
+                    look: look,
+                    iso: iso,
+                    highlightClipping: highlight,
+                    shadowClipping: shadow,
+                    context: computedPhotoContext
+                )
+            }
+        }.value
+
+        do {
+            if let merged {
+                let label = kind == .hdr ? "Saved an HDR merge of \(ordered.count) exposures." : "Saved a night photo averaged from \(ordered.count) frames."
+                try await record(CapturedPhoto(processed: merged, original: ordered[reference]))
+                toast = label
+            } else {
+                // The frames could not be merged. The normal exposure is a native photo, so it is saved, and the toast says why.
+                try await record(CapturedPhoto(
+                    processed: ordered[reference],
+                    fallbackReason: "The frames could not be aligned, so the normal exposure was saved."
+                ))
+                toast = "The frames could not be aligned, so the normal exposure was saved."
+            }
+            return true
+        } catch {
+            toast = error.localizedDescription
+            return false
+        }
+    }
+
+    /// What this shutter press should do, from the scene and what the camera supports. Refusals are kept in the reason.
+    private func planCapture() -> CapturePlan {
+        let wantsHDR = isHDREnabled && isAllowed(.hdrBracketing)
+        let wantsNight = isNightModeEnabled && isAllowed(.nightBurst)
+        guard wantsHDR || wantsNight else {
+            return CapturePlan(strategy: .single, reason: "Standard one-tap capture.")
+        }
+        guard let exposure = decision.exposure else {
+            return CapturePlan(strategy: .single, reason: "Waiting for the first analysis, so one photo was taken.")
+        }
+        let snapshot = camera.exposureSnapshot()
+        let focal = snapshot?.fieldOfViewDegrees.flatMap { MotionBlurRisk.focalLength35mm(fieldOfViewDegrees: $0) }
+        let scene = CaptureScene(
+            meanLuma: exposure.frameMean,
+            highlightClipping: exposure.highlightClipping,
+            shadowClipping: exposure.shadowClipping,
+            subjectMoving: decision.readiness == .moving,
+            displayZoom: displayZoom,
+            exposureSeconds: snapshot?.exposureSeconds,
+            focalLength35mm: focal
+        )
+        return CapturePlanner.plan(
+            scene: scene,
+            wantsHDR: wantsHDR,
+            wantsNight: wantsNight,
+            capability: camera.bracketCapability()
+        )
+    }
+
+    /// Why the chosen format cannot be met on this camera, or nil when it can. Shown on the options sheet.
+    func formatNote() -> String? {
+        let raw = camera.rawCapabilities()
+        return CaptureFormatSelector.choose(
+            format: captureFormat,
+            alongsideProcessed: alsoSavesProcessed,
+            candidates: raw.candidates,
+            proRAWAllowed: raw.proRAWAllowed
+        ).fallbackReason
+    }
+
+    /// The format to request. RAW is a choice the user makes, so it is checked against the configured gating first.
+    private func resolvedRequest() -> CaptureRequest {
+        guard captureFormat != .processed else { return .processed }
+        guard isAllowed(.rawCapture) else {
+            isPaywallPresented = true
+            return .processed
+        }
+        return CaptureRequest(format: captureFormat, alongsideProcessed: alsoSavesProcessed)
+    }
+
     /// Saves a photo, then counts it and updates the shutter thumbnail. A failed save is not counted.
-    private func record(_ data: Data) async throws {
-        try await library.save(data)
+    private func record(_ photo: CapturedPhoto) async throws {
+        try await library.save(photo)
         captureCount += 1
-        lastThumbnail = await Thumbnail.make(from: data, shortSide: 200)
+        if let primary = photo.primaryData {
+            lastThumbnail = await Thumbnail.make(from: primary, shortSide: 200)
+        }
     }
 
     private func disarmHandsFree() {
@@ -556,6 +762,16 @@ final class CameraViewModel {
         if isBestOfThreeArmed, !ThermalPolicy.allowsBestOfThree(thermalState) {
             isBestOfThreeArmed = false
             toast = "Best of three paused while the phone is warm."
+        }
+    }
+
+    /// Whether a white-balance command is worth sending: switching the lock on or off, or a change of at least 100 K.
+    /// Smaller drift is ignored, so the lock does not churn the device or oscillate.
+    private static func shouldApplyWhiteBalance(from current: Double?, to wanted: Double?) -> Bool {
+        switch (current, wanted) {
+        case (nil, nil): false
+        case let (currentKelvin?, wantedKelvin?): abs(currentKelvin - wantedKelvin) >= 100
+        default: true
         }
     }
 

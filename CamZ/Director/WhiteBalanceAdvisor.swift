@@ -22,21 +22,8 @@ enum LightSource: Equatable, Sendable {
     }
 }
 
-/// White balance the camera should use.
-enum WhiteBalanceMode: Equatable, Sendable {
-    /// The camera keeps adjusting white balance continuously. This is the default.
-    case continuousAuto
-    /// White balance is fixed to keep an intended warm cast. Only proposed when locking is enabled.
-    case locked
-}
-
-/// Classifies the light and decides whether white balance should stay automatic.
+/// Classifies the light from its colour cast. Whether to lock white balance is decided by `WhiteBalanceController`.
 enum WhiteBalanceAdvisor {
-    /// Locking white balance stays off until device tests show it beats continuous auto white balance.
-    static let lockingEnabled = false
-    /// The same source must be seen this many analyses in a row before a lock is considered.
-    static let requiredStableFrames = 8
-
     static func classify(_ color: AverageColor, meanLuma: Float) -> LightSource {
         guard meanLuma > 0.05 else { return .unknown }
         let green = max(color.green, 0.02)
@@ -48,14 +35,5 @@ enum WhiteBalanceAdvisor {
         if blueOverGreen > 1.12 { return meanLuma < 0.5 ? .overcast : .daylight }
         if abs(redOverGreen - 1) < 0.12, abs(blueOverGreen - 1) < 0.12, meanLuma > 0.4 { return .daylight }
         return .unknown
-    }
-
-    /// Continuous auto white balance unless every condition for a lock holds: locking enabled, an atmospheric scene
-    /// (sunset or night), a stable warm source, and enough consecutive frames.
-    static func mode(source: LightSource, atmosphericScene: Bool, stableFrames: Int) -> WhiteBalanceMode {
-        guard lockingEnabled, atmosphericScene, stableFrames >= requiredStableFrames else {
-            return .continuousAuto
-        }
-        return source == .tungsten ? .locked : .continuousAuto
     }
 }

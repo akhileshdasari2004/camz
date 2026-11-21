@@ -45,7 +45,10 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
     private let photoOutput = AVCapturePhotoOutput()
     private var deviceInput: AVCaptureDeviceInput?
     private var isConfigured = false
+    /// Normal captures in flight, kept alive until each one completes (keyed by the settings' unique ID).
     private var captureProcessors: [Int64: PhotoCaptureProcessor] = [:]
+    /// The one bracketed capture in flight, if any. Brackets never overlap; the view model guards that.
+    private var bracketProcessor: BracketCaptureProcessor?
     private var subjectAreaObserver: NSObjectProtocol?
     private var sessionObservers: [NSObjectProtocol] = []
     /// Tracks how the phone is physically held so photos come out level
@@ -177,6 +180,17 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
         }
     }
 
+    /// Returns focus to the centre with continuous autofocus, once AI focus has lost its subject. Exposure is left alone.
+    func releaseTrackingFocus() {
+        sessionQueue.async { [self] in
+            guard let device = deviceInput?.device else { return }
+            try? withLockedDevice(device) { d in
+                if d.isFocusPointOfInterestSupported { d.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+                if d.isFocusModeSupported(.continuousAutoFocus) { d.focusMode = .continuousAutoFocus }
+            }
+        }
+    }
+
     /// Moves zoom smoothly toward `factor` (about four times per second), so lens changes don't jump.
     func rampZoom(to factor: CGFloat) {
         sessionQueue.async { [self] in
@@ -187,17 +201,6 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
                 max: maxUsableZoom(for: device)
             )
             try? withLockedDevice(device) { $0.ramp(toVideoZoomFactor: value, withRate: 4) }
-        }
-    }
-
-    /// Returns focus to the centre with continuous autofocus, once AI focus has lost its subject. Exposure is left alone.
-    func releaseTrackingFocus() {
-        sessionQueue.async { [self] in
-            guard let device = deviceInput?.device else { return }
-            try? withLockedDevice(device) { d in
-                if d.isFocusPointOfInterestSupported { d.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
-                if d.isFocusModeSupported(.continuousAutoFocus) { d.focusMode = .continuousAutoFocus }
-            }
         }
     }
 
@@ -226,15 +229,57 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
         }
     }
 
+    /// Holds white balance at a colour temperature, using the device's own gains for it. Nil returns to continuous auto.
+    /// Gains are clamped to what the device allows, so a lock can never push a channel past its range.
+    func setWhiteBalanceLock(kelvin: Double?) {
+        sessionQueue.async { [self] in
+            guard let device = deviceInput?.device else { return }
+            try? withLockedDevice(device) { d in
+                guard let kelvin else {
+                    if d.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                        d.whiteBalanceMode = .continuousAutoWhiteBalance
+                    }
+                    return
+                }
+                guard d.isWhiteBalanceModeSupported(.locked) else { return }
+                let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: Float(kelvin), tint: 0)
+                var gains = d.deviceWhiteBalanceGains(for: values)
+                let limit = d.maxWhiteBalanceGain
+                gains.redGain = min(max(gains.redGain, 1), limit)
+                gains.greenGain = min(max(gains.greenGain, 1), limit)
+                gains.blueGain = min(max(gains.blueGain, 1), limit)
+                d.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+            }
+        }
+    }
+
     // MARK: - Capture
 
-    /// Captures a photo, applies the current filter at full resolution and
-    /// returns encoded HEIC (or JPEG) data. `willCapture` fires at the shutter moment.
+    /// One processed photo with the current look, at full resolution.
     func capturePhoto(
         flash: AVCaptureDevice.FlashMode,
         willCapture: @escaping @Sendable () -> Void
     ) async throws -> Data {
+        let photo = try await capture(.processed, flash: flash, willCapture: willCapture)
+        guard let data = photo.processed else { throw CameraError.captureFailed }
+        return data
+    }
+
+    /// One shutter press in the requested format. Where the request cannot be met, the photo is the best the camera
+    /// offers and `fallbackReason` says why.
+    func capture(
+        _ request: CaptureRequest,
+        flash: AVCaptureDevice.FlashMode,
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> CapturedPhoto {
         let engine = self.engine
+        let raw = rawCapabilities()
+        let choice = CaptureFormatSelector.choose(
+            format: request.format,
+            alongsideProcessed: request.alongsideProcessed,
+            candidates: raw.candidates,
+            proRAWAllowed: raw.proRAWAllowed
+        )
         return try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async { [self] in
                 guard session.isRunning else {
@@ -242,31 +287,15 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
                     return
                 }
 
-                let settings: AVCapturePhotoSettings
-                if photoOutput.availablePhotoCodecTypes.contains(.hevc) {
-                    settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-                } else {
-                    settings = AVCapturePhotoSettings()
-                }
-                if photoOutput.supportedFlashModes.contains(flash) {
-                    settings.flashMode = flash
-                }
-                settings.photoQualityPrioritization = .quality
-
-                if let connection = photoOutput.connection(with: .video) {
-                    // Level with the horizon however the phone is held (portrait or landscape).
-                    let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
-                    if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
-                    if connection.isVideoMirroringSupported {
-                        connection.automaticallyAdjustsVideoMirroring = false
-                        connection.isVideoMirrored = deviceInput?.device.position == .front
-                    }
-                }
+                let settings = makePhotoSettings(for: choice, flash: flash)
+                configureConnection()
 
                 let id = settings.uniqueID
                 let processor = PhotoCaptureProcessor(
                     engine: engine,
                     context: photoContext,
+                    fallbackReason: choice.fallbackReason,
+                    expectsProRAW: choice.raw?.kind == .appleProRAW,
                     willCapture: willCapture
                 ) { [weak self] result in
                     self?.sessionQueue.async { self?.captureProcessors[id] = nil }
@@ -275,6 +304,93 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
                 captureProcessors[id] = processor
                 photoOutput.capturePhoto(with: settings, delegate: processor)
             }
+        }
+    }
+
+    /// Bracketed exposures at the given EV offsets, in capture order. Frames are returned unprocessed for merging.
+    func captureBracket(
+        evOffsets: [Float],
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> [Data] {
+        try await withCheckedThrowingContinuation { continuation in
+            sessionQueue.async { [self] in
+                guard session.isRunning, !evOffsets.isEmpty, photoOutput.maxBracketedCapturePhotoCount >= evOffsets.count else {
+                    continuation.resume(throwing: CameraError.captureFailed)
+                    return
+                }
+                let brackets = evOffsets.map {
+                    AVCaptureAutoExposureBracketedStillImageSettings.autoExposureSettings(exposureTargetBias: $0)
+                }
+                let settings = AVCapturePhotoBracketSettings(
+                    rawPixelFormatType: 0,
+                    processedFormat: [AVVideoCodecKey: AVVideoCodecType.hevc],
+                    bracketedSettings: brackets
+                )
+                settings.photoQualityPrioritization = .quality
+                settings.flashMode = .off
+                configureConnection()
+
+                let processor = BracketCaptureProcessor(willCapture: willCapture) { [weak self] result in
+                    self?.sessionQueue.async { self?.bracketProcessor = nil }
+                    continuation.resume(with: result)
+                }
+                bracketProcessor = processor
+                photoOutput.capturePhoto(with: settings, delegate: processor)
+            }
+        }
+    }
+
+    /// The RAW formats this camera offers right now, classified with AVFoundation. Empty until the session is configured.
+    func rawCapabilities() -> RawCapabilities {
+        sessionQueue.sync {
+            let candidates = photoOutput.availableRawPhotoPixelFormatTypes.compactMap { code -> RawFormatCandidate? in
+                if AVCapturePhotoOutput.isAppleProRAWPixelFormat(code) {
+                    return RawFormatCandidate(code: code, kind: .appleProRAW)
+                }
+                if AVCapturePhotoOutput.isBayerRAWPixelFormat(code) {
+                    return RawFormatCandidate(code: code, kind: .bayer)
+                }
+                return nil
+            }
+            return RawCapabilities(candidates: candidates, proRAWAllowed: photoOutput.isAppleProRAWEnabled)
+        }
+    }
+
+    /// Whether bracketed capture is available, and how many frames one bracket may hold.
+    func bracketCapability() -> BracketCapability {
+        sessionQueue.sync {
+            let maximum = photoOutput.maxBracketedCapturePhotoCount
+            return BracketCapability(supported: maximum >= 2, maxFrames: maximum)
+        }
+    }
+
+    /// Settings for one capture. A RAW request names the RAW pixel format; a processed companion uses HEVC.
+    private func makePhotoSettings(for choice: CaptureFormatChoice, flash: AVCaptureDevice.FlashMode) -> AVCapturePhotoSettings {
+        let settings: AVCapturePhotoSettings
+        if let raw = choice.raw {
+            settings = choice.savesProcessed
+                ? AVCapturePhotoSettings(rawPixelFormatType: raw.code, processedFormat: [AVVideoCodecKey: AVVideoCodecType.hevc])
+                : AVCapturePhotoSettings(rawPixelFormatType: raw.code)
+        } else if photoOutput.availablePhotoCodecTypes.contains(.hevc) {
+            settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+        } else {
+            settings = AVCapturePhotoSettings()
+        }
+        if photoOutput.supportedFlashModes.contains(flash) {
+            settings.flashMode = flash
+        }
+        settings.photoQualityPrioritization = .quality
+        return settings
+    }
+
+    /// Level with the horizon however the phone is held, and mirrored like the preview on the front camera.
+    private func configureConnection() {
+        guard let connection = photoOutput.connection(with: .video) else { return }
+        let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
+        if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = deviceInput?.device.position == .front
         }
     }
 
@@ -312,6 +428,10 @@ final class CameraService: NSObject, CameraControlling, @unchecked Sendable {
             guard session.canAddOutput(photoOutput) else { throw CameraError.configurationFailed }
             session.addOutput(photoOutput)
             photoOutput.maxPhotoQualityPrioritization = .quality
+            // ProRAW is switched on only where the device supports it. Without support nothing changes for the photo path.
+            if photoOutput.isAppleProRAWSupported {
+                photoOutput.isAppleProRAWEnabled = true
+            }
         }
 
         // Deliver preview frames upright and mirrored like a selfie on the front camera.

@@ -4,72 +4,95 @@ import SwiftUI
 struct TopBar: View {
     @Bindable var model: CameraViewModel
 
+    /// Controls on the right: auto, hands-free, best of three, exposure and capture options.
+    private let rightButtonCount = 5
+
     var body: some View {
-        HStack {
-            if model.capabilities.hasFlash {
-                IconButton(systemName: flashIcon, isActive: model.flashMode != .off, label: flashLabel) {
-                    model.cycleFlash()
-                }
-            } else {
-                Color.clear.frame(width: 40, height: 40)
-            }
-
-            Spacer()
-
-            // The wordmark sits at a lens preset; the exact zoom readout appears only between presets (pinch).
-            Group {
-                if isAtPreset {
-                    BrandWordmark(size: 12)
-                        .transition(.opacity)
+        GeometryReader { geo in
+            // Sizes follow the screen width, so every control fits on compact iPhones. See `TopBarLayout`.
+            let style = TopBarLayout.style(availableWidth: geo.size.width, rightButtons: rightButtonCount)
+            HStack(spacing: 0) {
+                if model.capabilities.hasFlash {
+                    IconButton(systemName: flashIcon, isActive: model.flashMode != .off, label: flashLabel, size: style.buttonSize) {
+                        model.cycleFlash()
+                    }
                 } else {
-                    Text(String(format: "%.1f×", model.displayZoom))
-                        .font(.system(.footnote, design: .rounded).monospacedDigit().weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .accessibilityLabel("Zoom \(String(format: "%.1f", model.displayZoom)) times")
-                        .transition(.opacity)
+                    Color.clear.frame(width: style.buttonSize, height: style.buttonSize)
+                }
+
+                Spacer(minLength: 2)
+
+                // The wordmark sits at a lens preset when there is room; the zoom readout shows otherwise.
+                Group {
+                    if style.showsWordmark, isAtPreset {
+                        BrandWordmark(size: 12)
+                            .transition(.opacity)
+                    } else {
+                        Text(String(format: "%.1f×", model.displayZoom))
+                            .font(.system(.footnote, design: .rounded).monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .accessibilityLabel("Zoom \(String(format: "%.1f", model.displayZoom)) times")
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.snappy, value: isAtPreset)
+
+                Spacer(minLength: 2)
+
+                HStack(spacing: style.spacing) {
+                    IconButton(
+                        systemName: "sparkles",
+                        isActive: model.mode == .auto,
+                        label: model.mode == .auto ? "Auto mode on" : "Auto mode off",
+                        showsLock: !model.isAllowed(.manualControls),
+                        size: style.buttonSize
+                    ) {
+                        withAnimation(.snappy) { model.toggleMode() }
+                    }
+                    IconButton(
+                        systemName: "timer",
+                        isActive: model.isHandsFreeOn,
+                        label: model.isHandsFreeOn ? "Hands-free on" : "Hands-free off",
+                        showsLock: !model.isAllowed(.handsFree),
+                        size: style.buttonSize
+                    ) {
+                        withAnimation(.snappy) { model.toggleHandsFree() }
+                    }
+                    IconButton(
+                        systemName: "square.stack.3d.up",
+                        isActive: model.isBestOfThreeArmed,
+                        label: model.isBestOfThreeArmed ? "Best of three on" : "Best of three off",
+                        showsLock: !model.isAllowed(.bestOfThree),
+                        size: style.buttonSize
+                    ) {
+                        withAnimation(.snappy) { model.toggleBestOfThree() }
+                    }
+                    IconButton(systemName: "plusminus.circle", isActive: model.showExposure, label: "Exposure", size: style.buttonSize) {
+                        withAnimation(.snappy) { model.showExposure.toggle() }
+                    }
+                    IconButton(
+                        systemName: "slider.horizontal.3",
+                        isActive: optionsChanged,
+                        label: "Capture options",
+                        size: style.buttonSize
+                    ) {
+                        model.isOptionsPresented = true
+                    }
                 }
             }
-            .animation(.snappy, value: isAtPreset)
-
-            Spacer()
-
-            HStack(spacing: 6) {
-                IconButton(
-                    systemName: "sparkles",
-                    isActive: model.mode == .auto,
-                    label: model.mode == .auto ? "Auto mode on" : "Auto mode off",
-                    showsLock: !model.isPro
-                ) {
-                    withAnimation(.snappy) { model.toggleMode() }
-                }
-                IconButton(
-                    systemName: "timer",
-                    isActive: model.isHandsFreeOn,
-                    label: model.isHandsFreeOn ? "Hands-free on" : "Hands-free off",
-                    showsLock: !model.isPro
-                ) {
-                    withAnimation(.snappy) { model.toggleHandsFree() }
-                }
-                IconButton(
-                    systemName: "square.stack.3d.up",
-                    isActive: model.isBestOfThreeArmed,
-                    label: model.isBestOfThreeArmed ? "Best of three on" : "Best of three off",
-                    showsLock: !model.isPro
-                ) {
-                    withAnimation(.snappy) { model.toggleBestOfThree() }
-                }
-                IconButton(systemName: "plusminus.circle", isActive: model.showExposure, label: "Exposure") {
-                    withAnimation(.snappy) { model.showExposure.toggle() }
-                }
-                IconButton(systemName: "grid", isActive: model.showGrid, label: "Grid") {
-                    model.showGrid.toggle()
-                }
-            }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
     }
 
     private var isAtPreset: Bool {
         model.zoomPresets.contains { abs($0 - model.displayZoom) < 0.05 }
+    }
+
+    /// True when any capture option differs from the default, so the button shows it.
+    private var optionsChanged: Bool {
+        model.captureFormat != .processed || model.isHDREnabled || model.isNightModeEnabled || model.showGrid
     }
 
     private var flashIcon: String {
@@ -95,14 +118,16 @@ struct IconButton: View {
     let label: String
     /// Shows a small lock when the feature needs Cam Z Pro.
     var showsLock = false
+    /// Side length in points. Compact screens use a smaller size; see `TopBarLayout`.
+    var size: CGFloat = 40
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: size * 0.425, weight: .semibold))
                 .foregroundStyle(isActive ? Color.accentColor : .white)
-                .frame(width: 40, height: 40)
+                .frame(width: size, height: size)
                 .background(.white.opacity(0.08), in: Circle())
                 .overlay(alignment: .bottomTrailing) {
                     if showsLock {

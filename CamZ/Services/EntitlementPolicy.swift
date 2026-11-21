@@ -1,19 +1,28 @@
 import Foundation
 
 /// Features that need Cam Z Pro. One subscription unlocks all of them.
-enum ProFeature: CaseIterable, Sendable {
+enum ProFeature: String, CaseIterable, Sendable {
     /// AI-triggered capture after a visible countdown. The manual shutter always stays available.
     case handsFree
     /// Three quick shots, keeping the sharpest one with open eyes.
     case bestOfThree
     /// Pro mode: exposure and focus are left to the user.
     case manualControls
+    /// RAW and ProRAW capture. Free by default; configurable in Info.plist.
+    case rawCapture
+    /// Bracketed HDR merge. Free by default; configurable in Info.plist.
+    case hdrBracketing
+    /// Multi-frame night captures. Free by default; configurable in Info.plist.
+    case nightBurst
 
     var title: String {
         switch self {
         case .handsFree: "Hands-free AI capture"
         case .bestOfThree: "Best of three"
         case .manualControls: "Pro mode controls"
+        case .rawCapture: "RAW capture"
+        case .hdrBracketing: "HDR merge"
+        case .nightBurst: "Night burst"
         }
     }
 }
@@ -67,9 +76,14 @@ enum EntitlementPolicy {
         }
     }
 
-    /// Every Pro feature needs the same entitlement.
-    static func allows(_ feature: ProFeature, isPro: Bool) -> Bool {
-        isPro
+    /// Whether a feature may run. Gated features need Pro; the rest are free. `gated` comes from `AppConfiguration`, so the
+    /// split can change without touching camera code.
+    static func allows(
+        _ feature: ProFeature,
+        isPro: Bool,
+        gated: Set<ProFeature> = AppConfiguration.defaultGatedFeatures
+    ) -> Bool {
+        !gated.contains(feature) || isPro
     }
 }
 

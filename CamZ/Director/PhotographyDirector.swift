@@ -23,6 +23,10 @@ struct PhotoDecision: Equatable, Sendable {
     var blurRisk: MotionBlurRisk.Level = .unknown
     /// The light the frame appears to be lit by. A heuristic from the colour cast, not a measurement.
     var lightSource: LightSource = .unknown
+    /// Estimated colour temperature of the light in kelvin (see `ColorTemperature`). Nil when not measured.
+    var colorTemperature: Double?
+    /// True for sunset and night scenes, where warm light is part of the picture.
+    var atmosphericLight = false
 }
 
 /// Runs scene, exposure, lens, focus and guidance analysis on live preview frames.
@@ -148,6 +152,7 @@ final class PhotographyDirector: @unchecked Sendable {
         let warmth = colour.map { $0.red - $0.blue }
         let warm = warmth.map { SceneClassifier.isWarm(redMinusBlue: $0) } ?? false
         let lightSource = colour.map { WhiteBalanceAdvisor.classify($0, meanLuma: frameMean) } ?? .unknown
+        let kelvin = colour.flatMap { ColorTemperature.kelvin($0) }
         let lowLight = frameMean < SceneClassifier.nightMean * 1.5
 
         // Scene: labels and faces first, then brightness and colour cast as a low-confidence fallback.
@@ -214,7 +219,9 @@ final class PhotographyDirector: @unchecked Sendable {
             readiness: readinessNow,
             faceCount: faces.count,
             blurRisk: blurRisk,
-            lightSource: lightSource
+            lightSource: lightSource,
+            colorTemperature: kelvin,
+            atmosphericLight: ExposureAnalyzer.intent(for: scene, warm: warm, frameMean: frameMean) == .atmospheric
         )
     }
 

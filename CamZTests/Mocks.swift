@@ -62,6 +62,49 @@ final class MockCamera: CameraControlling, @unchecked Sendable {
     func trackFocus(at point: CGPoint) { trackedFocusPoints.append(point) }
     func releaseTrackingFocus() { focusReleaseCount += 1 }
 
+    // RAW, bracketing and white balance. The format choice uses the real selector, so tests exercise the real fallbacks.
+    var rawSupport = RawCapabilities.none
+    var bracketSupport = BracketCapability.none
+    /// Frames returned by the next bracketed capture.
+    var bracketResult: Result<[Data], Error> = .success([])
+    private(set) var captureRequests: [CaptureRequest] = []
+    private(set) var bracketOffsetCalls: [[Float]] = []
+    private(set) var whiteBalanceLocks: [Double?] = []
+
+    func capture(
+        _ request: CaptureRequest,
+        flash: AVCaptureDevice.FlashMode,
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> CapturedPhoto {
+        captureRequests.append(request)
+        let choice = CaptureFormatSelector.choose(
+            format: request.format,
+            alongsideProcessed: request.alongsideProcessed,
+            candidates: rawSupport.candidates,
+            proRAWAllowed: rawSupport.proRAWAllowed
+        )
+        let data = try await capturePhoto(flash: flash, willCapture: willCapture)
+        return CapturedPhoto(
+            processed: choice.savesProcessed ? data : nil,
+            raw: choice.raw == nil ? nil : Data([0x52, 0x41, 0x57]),
+            rawIsProRAW: choice.raw?.kind == .appleProRAW,
+            fallbackReason: choice.fallbackReason
+        )
+    }
+
+    func captureBracket(
+        evOffsets: [Float],
+        willCapture: @escaping @Sendable () -> Void
+    ) async throws -> [Data] {
+        bracketOffsetCalls.append(evOffsets)
+        willCapture()
+        return try bracketResult.get()
+    }
+
+    func rawCapabilities() -> RawCapabilities { rawSupport }
+    func bracketCapability() -> BracketCapability { bracketSupport }
+    func setWhiteBalanceLock(kelvin: Double?) { whiteBalanceLocks.append(kelvin) }
+
     func capturePhoto(
         flash: AVCaptureDevice.FlashMode,
         willCapture: @escaping @Sendable () -> Void
@@ -75,11 +118,29 @@ final class MockCamera: CameraControlling, @unchecked Sendable {
 
 final class MockLibrary: PhotoSaving, @unchecked Sendable {
     var error: Error?
+    /// Saves that fail before the library starts working, to test save fallbacks.
+    var failuresBeforeSuccess = 0
     private(set) var saved: [Data] = []
+    /// Captures handed to the library, with their companion files, for pairing tests.
+    private(set) var savedCaptures: [CapturedPhoto] = []
 
     func save(_ data: Data) async throws {
+        if failuresBeforeSuccess > 0 {
+            failuresBeforeSuccess -= 1
+            throw error ?? TestError()
+        }
         if let error { throw error }
         saved.append(data)
+    }
+
+    func save(_ photo: CapturedPhoto) async throws {
+        if failuresBeforeSuccess > 0 {
+            failuresBeforeSuccess -= 1
+            throw error ?? TestError()
+        }
+        if let error { throw error }
+        savedCaptures.append(photo)
+        if let primary = photo.primaryData { saved.append(primary) }
     }
 }
 
